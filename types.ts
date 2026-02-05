@@ -1,7 +1,7 @@
 export interface SignatureFile {
   name: string; // The base name, e.g., "HongGilDong"
   variant: string; // The full filename or id, e.g., "HongGilDong_1"
-  dataUrl: string; // Base64 image data
+  previewUrl: string; // Changed from dataUrl: Use Blob URL for memory efficiency
   width: number;
   height: number;
 }

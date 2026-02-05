@@ -29,6 +29,14 @@ export default function App() {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    // Check file size (Warning if > 5MB)
+    if (file.size > 5 * 1024 * 1024) {
+      if (!window.confirm(`선택하신 엑셀 파일의 용량이 큽니다 (${(file.size / 1024 / 1024).toFixed(1)}MB).\n파일 내에 이미지가 많거나 행이 매우 많으면 'Out of Memory' 오류가 발생할 수 있습니다.\n\n계속 진행하시겠습니까?`)) {
+        if (excelInputRef.current) excelInputRef.current.value = '';
+        return;
+      }
+    }
+
     try {
       setProcessing(true);
       const buffer = await file.arrayBuffer();
@@ -50,56 +58,57 @@ export default function App() {
     if (!files || files.length === 0) return;
 
     setProcessing(true);
-    // Explicitly type the Map to prevent inference issues
     const newSignatures = new Map<string, SignatureFile[]>(state.signatures);
     let count = 0;
 
+    // Process files in chunks to avoid UI freeze, but here we just loop async
+    // Using Blob URLs is fast enough to loop directly
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       // Only images
       if (!file.type.startsWith('image/')) continue;
 
-      const reader = new FileReader();
-      const loadPromise = new Promise<SignatureFile>((resolve) => {
-        reader.onload = (evt) => {
-          const img = new Image();
-          img.onload = () => {
-            // Parse name logic:
-            // "HongGilDong_1.png" -> Base: "HongGilDong", Variant: "HongGilDong_1.png"
-            // "HongGilDong.png" -> Base: "HongGilDong"
-            // Handle multiple underscores: "Hong_Gil_Dong_1.png" -> "Hong_Gil_Dong"
-            
-            const fileNameNoExt = file.name.substring(0, file.name.lastIndexOf('.'));
-            const lastUnderscoreIdx = fileNameNoExt.lastIndexOf('_');
-            
-            let baseNameString = fileNameNoExt;
-            // If underscore exists, assume suffix (e.g. _1) is the variant ID
-            if (lastUnderscoreIdx > 0) {
-              baseNameString = fileNameNoExt.substring(0, lastUnderscoreIdx);
-            }
+      // --- MEMORY FIX: Use Blob URL instead of reading file content ---
+      const objectUrl = URL.createObjectURL(file);
 
-            const baseName = normalizeName(baseNameString);
-            
-            resolve({
-              name: baseName,
-              variant: file.name, // unique ID including extension
-              dataUrl: evt.target?.result as string,
-              width: img.width,
-              height: img.height
-            });
-          };
-          img.src = evt.target?.result as string;
-        };
-        reader.readAsDataURL(file);
+      // We need dimensions to calculate aspect ratio later, but we load it lightly
+      const getImageDims = () => new Promise<{w: number, h: number}>((resolve) => {
+         const img = new Image();
+         img.onload = () => resolve({ w: img.width, h: img.height });
+         img.onerror = () => resolve({ w: 100, h: 50 }); // Fallback
+         img.src = objectUrl;
       });
 
-      const sigFile = await loadPromise;
+      const { w, h } = await getImageDims();
+
+      // Parse name logic:
+      const fileNameNoExt = file.name.substring(0, file.name.lastIndexOf('.'));
+      const lastUnderscoreIdx = fileNameNoExt.lastIndexOf('_');
+      
+      let baseNameString = fileNameNoExt;
+      if (lastUnderscoreIdx > 0) {
+        baseNameString = fileNameNoExt.substring(0, lastUnderscoreIdx);
+      }
+
+      const baseName = normalizeName(baseNameString);
+      
+      const sigFile: SignatureFile = {
+        name: baseName,
+        variant: file.name,
+        previewUrl: objectUrl, // Store lightweight URL
+        width: w,
+        height: h
+      };
+
       const list: SignatureFile[] = newSignatures.get(sigFile.name) || [];
       // Avoid duplicates
       if (!list.find(s => s.variant === sigFile.variant)) {
         list.push(sigFile);
         newSignatures.set(sigFile.name, list);
         count++;
+      } else {
+        // If duplicate, revoke the new URL to save memory
+        URL.revokeObjectURL(objectUrl);
       }
     }
 
@@ -130,7 +139,7 @@ export default function App() {
       setState(prev => ({ ...prev, step: 'export' }));
     } catch (err) {
       console.error(err);
-      setError("엑셀 파일 생성에 실패했습니다.");
+      setError("엑셀 파일 생성에 실패했습니다. 메모리가 부족하여 브라우저가 중단되었을 수 있습니다. 작업을 나누거나 이미지를 줄여주세요.");
     } finally {
       setProcessing(false);
     }
@@ -138,6 +147,11 @@ export default function App() {
 
   const handleReset = () => {
     if (window.confirm("정말로 처음부터 다시 시작하시겠습니까?")) {
+      // Cleanup existing blob URLs
+      state.signatures.forEach(list => {
+        list.forEach(s => URL.revokeObjectURL(s.previewUrl));
+      });
+      
       setState(getInitialState());
       if (excelInputRef.current) excelInputRef.current.value = '';
       if (sigInputRef.current) sigInputRef.current.value = '';
@@ -274,7 +288,8 @@ export default function App() {
                       if (assignment) {
                          const sigs = state.signatures.get(assignment.signatureBaseName);
                          const sig = sigs?.find(s => s.variant === assignment.signatureVariantId);
-                         sigImgUrl = sig?.dataUrl;
+                         // Use previewUrl instead of dataUrl
+                         sigImgUrl = sig?.previewUrl;
                       }
 
                       return (
