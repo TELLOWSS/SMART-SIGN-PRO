@@ -3,9 +3,6 @@ import { SheetData, RowData, CellData, SignatureFile, SignatureAssignment } from
 
 /**
  * 매칭을 위해 이름 정규화
- * 1. 괄호 및 괄호 안의 내용 제거 (예: "홍길동 (주)", "John (Manager)" -> "홍길동", "John")
- * 2. 한글, 영문, 숫자 이외의 특수문자 및 공백 제거 (예: "Hong-Gil-Dong" -> "HongGilDong")
- * 3. 영문 대소문자 통일 (소문자)
  */
 export const normalizeName = (name: string) => {
   if (!name) return '';
@@ -18,76 +15,86 @@ export const normalizeName = (name: string) => {
 
 /**
  * 엑셀 셀 값을 안전하게 문자열로 변환하는 헬퍼 함수
- * RichText, 수식(Formula), 숫자, 문자열 등 다양한 타입을 처리합니다.
  */
 const getCellValueAsString = (cell: ExcelJS.Cell | undefined): string => {
   if (!cell || cell.value === null || cell.value === undefined) return '';
 
   const val = cell.value;
 
-  // 1. 객체 타입 (RichText, Hyperlink, Formula 등)
   if (typeof val === 'object') {
-    // 수식(Formula)의 경우 계산된 결과값(result)을 사용
     if ('result' in val) {
       return val.result !== undefined ? val.result.toString() : '';
     }
-    // RichText (스타일이 적용된 텍스트)
     if ('richText' in val && Array.isArray((val as any).richText)) {
       return (val as any).richText.map((rt: any) => rt.text).join('');
     }
-    // Hyperlink
     if ('text' in val) {
       return (val as any).text.toString();
     }
-    // 기타 객체는 JSON 문자열 또는 toString 시도
     return val.toString();
   }
 
-  // 2. 기본 타입 (string, number)
   return val.toString();
 };
 
 /**
- * 이미지 회전 헬퍼 함수
- * 캔버스를 사용하여 이미지를 회전시키고 새로운 Base64 문자열을 반환합니다.
+ * 이미지 회전 및 최적화 헬퍼 함수 (Smart Resizing & Rotation)
+ * 1. 이미지를 회전시킵니다.
+ * 2. 인쇄 품질(300DPI)을 유지할 수 있는 최적의 크기(Max Width 600px)로 리사이징하여 메모리를 절약합니다.
  */
 const rotateImage = async (dataUrl: string, degrees: number): Promise<string> => {
-  if (Math.abs(degrees) < 0.1) return dataUrl; // 회전이 거의 없으면 원본 반환
-
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
       if (!ctx) { resolve(dataUrl); return; }
+
+      // --- Smart Resizing Logic ---
+      // 서명란(보통 3~5cm) 기준 300DPI 인쇄 시 약 400~600px이면 충분히 선명함.
+      // 원본이 4000px인 사진을 그대로 쓰면 메모리 폭발함. 이를 방지.
+      const MAX_WIDTH = 600; 
+      let scaleFactor = 1;
+      
+      // 원본이 너무 크면 축소, 작으면 유지 (확대하지 않음)
+      if (img.width > MAX_WIDTH) {
+        scaleFactor = MAX_WIDTH / img.width;
+      }
+
+      const drawWidth = img.width * scaleFactor;
+      const drawHeight = img.height * scaleFactor;
       
       const rad = degrees * Math.PI / 180;
-      // 회전 시 잘림 방지를 위해 캔버스 크기 재계산
       const absCos = Math.abs(Math.cos(rad));
       const absSin = Math.abs(Math.sin(rad));
-      canvas.width = img.width * absCos + img.height * absSin;
-      canvas.height = img.width * absSin + img.height * absCos;
       
-      // 중심점 이동 후 회전
+      // 회전 후 캔버스 크기 계산 (리사이징된 크기 기준)
+      canvas.width = drawWidth * absCos + drawHeight * absSin;
+      canvas.height = drawWidth * absSin + drawHeight * absCos;
+      
+      // 렌더링 품질 설정 (High Quality)
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+
+      // 중심점 이동 후 회전 및 그리기
       ctx.translate(canvas.width / 2, canvas.height / 2);
       ctx.rotate(rad);
-      ctx.drawImage(img, -img.width / 2, -img.height / 2);
+      ctx.drawImage(img, -drawWidth / 2, -drawHeight / 2, drawWidth, drawHeight);
       
       resolve(canvas.toDataURL('image/png'));
     };
-    img.onerror = () => resolve(dataUrl); // 에러 시 원본 반환
+    img.onerror = () => resolve(dataUrl);
     img.src = dataUrl;
   });
 };
 
 /**
- * 업로드된 엑셀 파일 버퍼를 파싱하여 미리보기 UI용 데이터를 추출합니다.
+ * 업로드된 엑셀 파일 버퍼를 파싱
  */
 export const parseExcelFile = async (buffer: ArrayBuffer): Promise<SheetData> => {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(buffer);
 
-  // 첫 번째 시트를 대상으로 가정
   const worksheet = workbook.worksheets[0];
   if (!worksheet) throw new Error("파일에서 워크시트를 찾을 수 없습니다.");
 
@@ -96,11 +103,9 @@ export const parseExcelFile = async (buffer: ArrayBuffer): Promise<SheetData> =>
   worksheet.eachRow({ includeEmpty: true }, (row, rowNumber) => {
     const cells: CellData[] = [];
     row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
-      // 미리보기용 데이터 추출 시에도 강력한 변환기 사용
       const stringValue = getCellValueAsString(cell);
-      
       cells.push({
-        value: stringValue, // UI 표시용 문자열
+        value: stringValue,
         address: cell.address,
         row: rowNumber,
         col: colNumber,
@@ -116,7 +121,7 @@ export const parseExcelFile = async (buffer: ArrayBuffer): Promise<SheetData> =>
 };
 
 /**
- * '1' 표시가 된 셀을 찾아 서명과 자동으로 매칭하는 휴리스틱 로직입니다.
+ * 서명 자동 매칭 로직
  */
 export const autoMatchSignatures = (
   sheetData: SheetData,
@@ -124,23 +129,16 @@ export const autoMatchSignatures = (
 ): Map<string, SignatureAssignment> => {
   const assignments = new Map<string, SignatureAssignment>();
   
-  // 1. "이름/성명" 열 인덱스 찾기
   let nameColIndex = -1;
   let headerRowIndex = -1;
-
-  // 헤더 탐색 범위 확장 (상단 30행) - 헤더가 복잡할 경우를 대비
   const MAX_HEADER_SEARCH_ROWS = 30;
 
   for (let r = 0; r < Math.min(sheetData.rows.length, MAX_HEADER_SEARCH_ROWS); r++) {
     const row = sheetData.rows[r];
     for (const cell of row.cells) {
       if (!cell.value) continue;
-      
-      // 공백 및 특수문자 제거 후 비교
       const rawVal = cell.value.toString();
       const normalizedValue = rawVal.replace(/[\s\u00A0\uFEFF]+/g, '');
-      
-      // 정규식으로 '성명', '이름', 'Name' 패턴 확인
       if (/(성명|이름|Name)/i.test(normalizedValue)) {
         nameColIndex = cell.col;
         headerRowIndex = r;
@@ -155,52 +153,38 @@ export const autoMatchSignatures = (
     return assignments;
   }
 
-  // 2. 헤더 이후의 행 순회
   for (let r = headerRowIndex + 1; r < sheetData.rows.length; r++) {
     const row = sheetData.rows[r];
-    
-    // 이 행의 이름 찾기
     const nameCell = row.cells.find(c => c.col === nameColIndex);
     if (!nameCell || !nameCell.value) continue;
 
     const rawName = nameCell.value.toString();
     const cleanName = normalizeName(rawName);
 
-    // 이름이 비어있으면 스킵
     if (!cleanName) continue;
 
-    // 이 이름에 해당하는 서명 파일이 있는지 확인
     const availableSigs = signatures.get(cleanName);
     
-    // 서명이 있고, 행 내에 '1' 표시가 있다면 매칭
     if (availableSigs && availableSigs.length > 0) {
       for (const cell of row.cells) {
-        // 이름 열 자체는 건너뜀
         if (cell.col === nameColIndex) continue;
         if (!cell.value) continue;
-
-        // "1" 마커 확인
         const cellStr = cell.value.toString().replace(/[\s\u00A0\uFEFF]+/g, '');
         
-        // 유연한 매칭 (괄호, 점 등 허용)
         if (['1', '(1)', '1.', '1)'].includes(cellStr)) {
           const key = `${cell.row}:${cell.col}`;
           
-          // --- 서명 랜덤 선택 로직 (Random Selection Logic) ---
           const randomSigIndex = Math.floor(Math.random() * availableSigs.length);
           const selectedSig = availableSigs[randomSigIndex];
           
-          // --- 분석 및 개선: Safe Print Mode V2 ---
-          // 분석 결과: 이전의 1.1~1.4 배율과 24px 높이는 일반적인 엑셀 행 높이(약 22px)를 초과하여 하단이 잘릴 위험이 큼.
-          // 개선: 
-          // 1. 회전 각도를 -8도~+8도로 더욱 제한하여 모서리 튀어나옴 방지
-          const rotation = (Math.random() * 16) - 8;
+          // --- Memory Optimization: Integer Rotation ---
+          // 회전 각도를 정수(-8, -7 ... 7, 8)로 제한합니다.
+          // 이는 generateFinalExcel 단계에서 이미지 캐싱 적중률(Cache Hit Rate)을 높여
+          // 파일 용량을 획기적으로 줄이는 핵심 기술입니다.
+          const rotation = Math.floor(Math.random() * 17) - 8; // -8 ~ +8 integer
           
-          // 2. 크기 배율을 1.0~1.3으로 축소 (베이스 높이도 20px로 줄일 예정)
-          const scale = 1.0 + (Math.random() * 0.3);
-
-          // 3. 위치 오프셋: 수평은 허용하되, 수직은 0으로 완전 고정
-          const offsetX = (Math.random() * 4) - 2;
+          const scale = 1.0 + (Math.random() * 0.3); // 1.0 ~ 1.3
+          const offsetX = Math.floor(Math.random() * 5) - 2; // -2 ~ +2 integer
           const offsetY = 0; 
 
           assignments.set(key, {
@@ -222,7 +206,7 @@ export const autoMatchSignatures = (
 };
 
 /**
- * 이미지가 포함된 최종 엑셀 파일을 생성합니다.
+ * 최종 엑셀 생성 (고속 캐싱 적용)
  */
 export const generateFinalExcel = async (
   originalBuffer: ArrayBuffer,
@@ -233,7 +217,11 @@ export const generateFinalExcel = async (
   await workbook.xlsx.load(originalBuffer);
   const worksheet = workbook.worksheets[0];
 
-  // 1. 이미지 ID 캐시
+  // --- Image Cache Optimization ---
+  // Key: "SignatureID_RotationAngle" (예: "Hong_1_-5")
+  // Value: ExcelJS Image ID
+  // 회전 각도가 정수로 제한되어 있으므로, 동일한 서명이 여러 번 쓰일 때 
+  // 이미지를 새로 만들지 않고 기존 ID를 재사용합니다. (파일 용량 대폭 감소)
   const imageIdMap = new Map<string, number>();
 
   const findSigFile = (name: string, variant: string) => {
@@ -241,50 +229,46 @@ export const generateFinalExcel = async (
     return list?.find(s => s.variant === variant);
   };
 
-  // 2. 할당된 정보(assignments)를 순회하며 이미지 배치
   for (const assignment of assignments.values()) {
     const sigFile = findSigFile(assignment.signatureBaseName, assignment.signatureVariantId);
     if (!sigFile) continue;
 
-    // 이미지 회전 처리
-    const rotatedDataUrl = await rotateImage(sigFile.dataUrl, assignment.rotation);
-    const cacheKey = `${sigFile.variant}_${assignment.rotation.toFixed(2)}`;
-
+    // 캐시 키 생성 (정수 회전값 사용으로 캐시 효율 극대화)
+    const cacheKey = `${sigFile.variant}_${assignment.rotation}`;
+    
     let imageId = imageIdMap.get(cacheKey);
+
     if (imageId === undefined) {
+      // 캐시 미스: 이미지 처리 수행 (비용이 큼)
+      // 여기서 rotateImage는 Smart Resizing을 수행하여 600px 이하로 최적화된 이미지를 반환함
+      const rotatedDataUrl = await rotateImage(sigFile.dataUrl, assignment.rotation);
+      
       imageId = workbook.addImage({
         base64: rotatedDataUrl,
         extension: 'png',
       });
+      
+      // 캐시에 저장
       imageIdMap.set(cacheKey, imageId);
     }
 
-    // 좌표계 조정 (1-based -> 0-based)
+    // 좌표계 조정
     const targetCol = assignment.col - 1;
     const targetRow = assignment.row - 1;
 
-    // --- 분석 기반 개선: 크기 및 배치 최적화 ---
-    // 기존 24px -> 20px로 축소 (표준 엑셀 행 높이 16.5pt ~= 22px 내에 안전하게 안착 유도)
-    // Max Height at 1.3 scale = 26px. 
-    // 여전히 표준 행보다 약간 클 수 있으나, 보통 서명란은 행 높이를 키우는 경우가 많으므로 적절한 타협점.
+    // 배치 크기 계산 (Base 20px -> Scale 적용)
     const baseHeight = 20; 
-    const baseWidth = 50; // 비율 유지하며 너비도 소폭 축소
+    const baseWidth = 50; 
     
     const finalWidth = baseWidth * assignment.scale; 
     const finalHeight = baseHeight * assignment.scale;
 
-    // 배치 로직: 상단 고정 오프셋
-    // 0.15 (15%) 오프셋은 22px 행 기준 약 3.3px 띄움. 
-    // 3.3px(top) + 26px(height) = 29.3px. 
-    // 표준 행(22px)이라면 여전히 7px 넘침. 
-    // 하지만 완전히 작게 만들면 가시성이 떨어짐.
-    // --> rowOffset을 0.1(10%)로 줄여 최대한 위로 붙임.
+    // 배치 오프셋
     let colOffset = 0.1 + (assignment.offsetX / 100);
     let rowOffset = 0.1; 
 
     // Safe clamping
     colOffset = Math.max(0.05, Math.min(0.95, colOffset));
-    // rowOffset은 고정이지만 안전장치 유지
     rowOffset = Math.max(0.05, Math.min(0.5, rowOffset)); 
 
     worksheet.addImage(imageId, {
@@ -296,7 +280,7 @@ export const generateFinalExcel = async (
       editAs: 'oneCell',
     });
     
-    // 원본 셀의 '1' 텍스트 제거
+    // 원본 텍스트 제거
     try {
       const cell = worksheet.getCell(assignment.row, assignment.col);
       const cellVal = cell.value ? cell.value.toString().replace(/[\s\u00A0\uFEFF]+/g, '') : '';
@@ -304,7 +288,7 @@ export const generateFinalExcel = async (
          cell.value = '';
       }
     } catch (e) {
-      // Ignore cell access error
+      // Ignore
     }
   }
 
