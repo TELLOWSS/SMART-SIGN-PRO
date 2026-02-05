@@ -1,0 +1,5 @@
+{
+  "name": "Copy of SafetySignPro - 개인보호구 서명 자동화",
+  "description": "개인보호구 안전관리비 엑셀 양식에 수기 서명을 자동으로 입력해주는 프로그램입니다. 지능형 매칭, 랜덤 변형(회전/크기), 정밀한 엑셀 내보내기 기능을 제공합니다.",
+  "requestFramePermissions": []
+}
