@@ -40,7 +40,7 @@ const getCellValueAsString = (cell: ExcelJS.Cell | undefined): string => {
 /**
  * 이미지 회전 및 최적화 헬퍼 함수 (High Quality V4)
  * Input: Blob URL (memory efficient)
- * Resizing: Increased to 800px for high-quality printing.
+ * Output: Data URL (Base64)
  */
 const rotateImage = async (blobUrl: string, degrees: number): Promise<string> => {
   return new Promise((resolve) => {
@@ -51,9 +51,7 @@ const rotateImage = async (blobUrl: string, degrees: number): Promise<string> =>
       const ctx = canvas.getContext('2d');
       if (!ctx) { resolve(blobUrl); return; }
 
-      // --- High Quality Logic V4 ---
-      // User confirmed the root cause was infinite rows, so we can use high quality images.
-      // 800px is excellent for printing (approx 6-7cm width at 300DPI).
+      // --- High Quality Logic ---
       const MAX_WIDTH = 800; 
       let scaleFactor = 1;
       
@@ -96,7 +94,6 @@ const rotateImage = async (blobUrl: string, degrees: number): Promise<string> =>
 
 /**
  * 업로드된 엑셀 파일 버퍼를 파싱
- * 중요: 빈 행이 연속으로 발견되면 파싱을 중단하여 메모리 누수를 방지함 (Smart Row Parsing)
  */
 export const parseExcelFile = async (buffer: ArrayBuffer): Promise<SheetData> => {
   const workbook = new ExcelJS.Workbook();
@@ -108,13 +105,10 @@ export const parseExcelFile = async (buffer: ArrayBuffer): Promise<SheetData> =>
   const rows: RowData[] = [];
   
   // --- Infinite Row Protection ---
-  // 건설/공무 양식은 10만 줄까지 서식이 적용된 경우가 많음.
-  // 연속으로 50줄 이상 데이터가 없으면 문서 끝으로 간주하고 중단.
   const MAX_CONSECUTIVE_EMPTY_ROWS = 50;
   let consecutiveEmptyCount = 0;
 
   worksheet.eachRow({ includeEmpty: true }, (row, rowNumber) => {
-    // 이미 종료 조건을 만났으면 스킵
     if (consecutiveEmptyCount > MAX_CONSECUTIVE_EMPTY_ROWS) return;
 
     let hasContent = false;
@@ -134,7 +128,7 @@ export const parseExcelFile = async (buffer: ArrayBuffer): Promise<SheetData> =>
     });
 
     if (hasContent) {
-      consecutiveEmptyCount = 0; // 내용이 있으면 카운터 초기화
+      consecutiveEmptyCount = 0;
       rows.push({ index: rowNumber, cells });
     } else {
       consecutiveEmptyCount++;
@@ -161,14 +155,13 @@ export const autoMatchSignatures = (
   
   let nameColIndex = -1;
   let headerRowIndex = -1;
-  const MAX_HEADER_SEARCH_ROWS = 50; // 헤더 찾는 범위 약간 확장
+  const MAX_HEADER_SEARCH_ROWS = 50;
 
   for (let r = 0; r < Math.min(sheetData.rows.length, MAX_HEADER_SEARCH_ROWS); r++) {
     const row = sheetData.rows[r];
     for (const cell of row.cells) {
       if (!cell.value) continue;
       const rawVal = cell.value.toString();
-      // "성 명", "성명", "이 름" 등 공백 제거 후 비교
       const normalizedValue = rawVal.replace(/[\s\u00A0\uFEFF]+/g, '');
       if (/(성명|이름|Name)/i.test(normalizedValue)) {
         nameColIndex = cell.col;
@@ -202,19 +195,18 @@ export const autoMatchSignatures = (
         if (!cell.value) continue;
         const cellStr = cell.value.toString().replace(/[\s\u00A0\uFEFF]+/g, '');
         
-        // 1, (1), 1. 등 서명 마킹 확인
         if (['1', '(1)', '1.', '1)'].includes(cellStr)) {
           const key = `${cell.row}:${cell.col}`;
           
           const randomSigIndex = Math.floor(Math.random() * availableSigs.length);
           const selectedSig = availableSigs[randomSigIndex];
           
-          // Integer rotation (-8 to +8) to maximize cache hits
+          // Random offset calculations for X/Y
+          // Limit to small values to prevent layout breakage
           const rotation = Math.floor(Math.random() * 17) - 8; 
-          
           const scale = 1.0 + (Math.random() * 0.3); // 1.0 ~ 1.3
-          const offsetX = Math.floor(Math.random() * 5) - 2; // -2 ~ +2 integer
-          const offsetY = 0; 
+          const offsetX = Math.floor(Math.random() * 10) - 5; // -5px ~ +5px
+          const offsetY = Math.floor(Math.random() * 6) - 3;  // -3px ~ +3px
 
           assignments.set(key, {
             row: cell.row,
@@ -235,7 +227,14 @@ export const autoMatchSignatures = (
 };
 
 /**
- * 최종 엑셀 생성 (Batch Processing applied)
+ * 최종 엑셀 생성
+ * 
+ * Major Fixes for "File Corrupted" Error:
+ * 1. Coordinates: Uses standard Integer Column/Row + EMU Offsets (English Metric Units).
+ *    - 1 px is approx 9525 EMUs.
+ *    - This avoids floating point errors in XML generation which causes Excel to repair the file.
+ * 2. Dimensions: Rounds image dimensions to Integers.
+ * 3. Cell Safety: Checks if a cell is merged before clearing content.
  */
 export const generateFinalExcel = async (
   originalBuffer: ArrayBuffer,
@@ -247,6 +246,7 @@ export const generateFinalExcel = async (
   const worksheet = workbook.worksheets[0];
 
   const imageIdMap = new Map<string, number>();
+  const EMU_PER_PIXEL = 9525;
 
   const findSigFile = (name: string, variant: string) => {
     const list = signaturesMap.get(name);
@@ -254,13 +254,9 @@ export const generateFinalExcel = async (
   };
 
   const assignmentValues = Array.from(assignments.values());
-  
-  // --- BATCH PROCESSING LOOP ---
-  // Process items in small chunks to prevent UI freeze and allow potential GC
   const CHUNK_SIZE = 20; 
 
   for (let i = 0; i < assignmentValues.length; i++) {
-    // Every CHUNK_SIZE items, pause for a moment
     if (i % CHUNK_SIZE === 0) {
       await new Promise(resolve => setTimeout(resolve, 0));
     }
@@ -277,48 +273,85 @@ export const generateFinalExcel = async (
       const rotatedDataUrl = await rotateImage(sigFile.previewUrl, assignment.rotation);
       
       if (rotatedDataUrl) {
-          imageId = workbook.addImage({
-            base64: rotatedDataUrl,
-            extension: 'png',
-          });
-          imageIdMap.set(cacheKey, imageId);
+          const parts = rotatedDataUrl.split(',');
+          const base64Clean = parts.length > 1 ? parts[1] : parts[0];
+
+          if (base64Clean) {
+            imageId = workbook.addImage({
+              base64: base64Clean,
+              extension: 'png',
+            });
+            imageIdMap.set(cacheKey, imageId);
+          }
       }
     }
 
     if (imageId !== undefined) {
-        const targetCol = assignment.col - 1;
-        const targetRow = assignment.row - 1;
+        const targetCol = assignment.col - 1; // 0-based index
+        const targetRow = assignment.row - 1; // 0-based index
 
-        const baseHeight = 20; 
-        const baseWidth = 50; 
+        const MAX_BOX_WIDTH = 140 * assignment.scale; 
+        const MAX_BOX_HEIGHT = 65 * assignment.scale; 
+
+        const imgRatio = sigFile.width / sigFile.height;
         
-        const finalWidth = baseWidth * assignment.scale; 
-        const finalHeight = baseHeight * assignment.scale;
+        let finalWidth = MAX_BOX_WIDTH;
+        let finalHeight = MAX_BOX_WIDTH / imgRatio;
 
-        let colOffset = 0.1 + (assignment.offsetX / 100);
-        let rowOffset = 0.1; 
+        if (finalHeight > MAX_BOX_HEIGHT) {
+          finalHeight = MAX_BOX_HEIGHT;
+          finalWidth = MAX_BOX_HEIGHT * imgRatio;
+        }
 
-        colOffset = Math.max(0.05, Math.min(0.95, colOffset));
-        rowOffset = Math.max(0.05, Math.min(0.5, rowOffset)); 
+        const intWidth = Math.round(finalWidth);
+        const intHeight = Math.round(finalHeight);
 
+        // Center the image in the cell roughly + random offset
+        // We assume a standard cell padding.
+        // X Offset: 5px padding + random
+        // Y Offset: 2px padding + random
+        const baseOffsetX = 5 + assignment.offsetX;
+        const baseOffsetY = 2 + assignment.offsetY;
+
+        // Convert to EMUs for strict OpenXML compliance
+        // Ensure non-negative to avoid XML validation errors
+        const emuColOff = Math.max(0, Math.round(baseOffsetX * EMU_PER_PIXEL));
+        const emuRowOff = Math.max(0, Math.round(baseOffsetY * EMU_PER_PIXEL));
+
+        // Use nativeColOff/nativeRowOff with integer col/row
+        // This is the most stable method for ExcelJS images
         worksheet.addImage(imageId, {
           tl: { 
-            col: targetCol + colOffset, 
-            row: targetRow + rowOffset 
+            col: targetCol, 
+            row: targetRow,
+            nativeColOff: emuColOff, 
+            nativeRowOff: emuRowOff 
           },
-          ext: { width: finalWidth, height: finalHeight },
-          editAs: 'oneCell',
+          ext: { width: intWidth, height: intHeight },
+          editAs: 'oneCell', // Moves with cells
         });
         
-        // Remove text placeholder
+        // Remove text placeholder safely
         try {
           const cell = worksheet.getCell(assignment.row, assignment.col);
-          const cellVal = cell.value ? cell.value.toString().replace(/[\s\u00A0\uFEFF]+/g, '') : '';
+          
+          // Only clear if it's the specific placeholder text
+          // And check if it's not part of a weird merge that shouldn't be touched (though value null is usually safe)
+          // We can check cell.isMerged, but sometimes '1' is in a merged cell. 
+          // If it is merged, ExcelJS shares the value. Setting master cell value is correct.
+          // If this is a slave cell in a merge, getCell returns the master usually? No, it returns the specific cell.
+          // We should find the master if merged.
+          
+          const master = cell.master; // If merged, this is the top-left cell
+          const cellToEdit = master || cell;
+
+          const cellVal = cellToEdit.value ? cellToEdit.value.toString().replace(/[\s\u00A0\uFEFF]+/g, '') : '';
+          
           if (['1', '(1)', '1.', '1)'].includes(cellVal)) {
-             cell.value = '';
+             cellToEdit.value = null; 
           }
         } catch (e) {
-          // Ignore
+          console.warn("Error clearing cell value", e);
         }
     }
   }
