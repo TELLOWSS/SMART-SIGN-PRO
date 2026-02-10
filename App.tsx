@@ -212,6 +212,14 @@ export default function App() {
     setProcessing(true);
     const startTime = performance.now();
     
+    // 콘솔 로그 활성화
+    const originalLog = console.log;
+    const logBuffer: string[] = [];
+    console.log = (...args) => {
+      originalLog(...args);
+      logBuffer.push(args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '));
+    };
+
     try {
       let assignmentsToUse = state.assignments;
       if (isRetry && state.sheetData) {
@@ -219,29 +227,39 @@ export default function App() {
         setState(prev => ({ ...prev, assignments: assignmentsToUse }));
       }
 
-      console.log(`[내보내기 시작] 서명 개수: ${assignmentsToUse.size}, 파일 크기: ${state.excelBuffer.byteLength} bytes`);
+      console.log(`========== [내보내기 시작] ==========`);
+      console.log(`원본 버퍼 크기: ${state.excelBuffer.byteLength} bytes`);
+      console.log(`서명 배치 수: ${assignmentsToUse.size}`);
+      console.log(`업로드된 서명: ${state.signatures.size}명`);
       
       const blob = await generateFinalExcel(state.excelBuffer, assignmentsToUse, state.signatures);
       
       const elapsed = performance.now() - startTime;
-      console.log(`[내보내기 완료] 소요 시간: ${elapsed.toFixed(1)}ms, 파일 크기: ${blob.size} bytes`);
+      console.log(`========== [내보내기 결과] ==========`);
+      console.log(`생성 파일 크기: ${blob.size} bytes`);
+      console.log(`소요 시간: ${elapsed.toFixed(1)}ms`);
       
       if (!blob || blob.size === 0) {
         throw new Error("생성된 파일이 비어있습니다 (0 bytes)");
       }
 
-      if (blob.size < 50) {
-        console.error(`❌ 파일 크기 이상: ${blob.size} bytes - 파일이 손상됨`);
-        throw new Error(`생성된 파일이 너무 작습니다 (${blob.size} bytes). 제너레이터 로그를 확인해주세요.`);
+      if (blob.size < 100) {
+        console.error(`❌ [실패] 파일 크기 이상: ${blob.size} bytes - 파일이 손상됨`);
+        console.error(`디버그 로그:\n${logBuffer.join('\n')}`);
+        throw new Error(`생성된 파일이 너무 작습니다 (${blob.size} bytes). 아래 디버그 정보를 확인해주세요.\n\n${logBuffer.slice(-5).join('\n')}`);
       }
 
+      // ZIP 파일 검증
+      const view = new Uint8Array(blob.stream ? await blob.stream().getReader().read() : []);
+      const isZip = view && view.length > 1 && view[0] === 0x50 && view[1] === 0x4b;
+      console.log(`ZIP 형식 검증: ${isZip ? '✓ 정상' : '✗ 비정상'}`);
+
       const url = URL.createObjectURL(blob);
-      console.log(`[다운로드 준비] Object URL 생성됨: ${url.substring(0, 50)}...`);
+      console.log(`Object URL 생성: ${url.substring(0, 50)}...`);
       
       const a = document.createElement('a');
       a.href = url;
       
-      // Timestamp to avoid filename collision
       const timestamp = new Date().toISOString().slice(11,19).replace(/:/g,'');
       const filename = `서명완료_${timestamp}_${state.excelFile?.name || 'output.xlsx'}`;
       
@@ -250,26 +268,29 @@ export default function App() {
       a.click();
       document.body.removeChild(a);
       
-      console.log(`[다운로드 시작] 파일명: ${filename}`);
+      console.log(`다운로드 시작: ${filename}`);
+      console.log(`========== [완료] ==========\n`);
       
-      // Clean up after a delay to allow download to start
       setTimeout(() => {
         URL.revokeObjectURL(url);
-        console.log(`[메모리 정리] Object URL 해제됨`);
+        console.log(`메모리 정리: Object URL 해제`);
       }, 100);
       
       setState(prev => ({ ...prev, step: 'export' }));
-      setToast({ msg: `✅ 파일이 생성되었습니다: ${filename} (${(blob.size / 1024).toFixed(1)}KB)`, type: 'success' });
+      setToast({ msg: `✅ 파일이 생성되었습니다: ${filename}\n(${(blob.size / 1024).toFixed(1)}KB)`, type: 'success' });
       setError(null);
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : "알 수 없는 오류";
-      const fullError = `${errorMsg}\n\n디버그 정보:\n- 엑셀 버퍼: ${state.excelBuffer?.byteLength || 0} bytes\n- 배치된 서명: ${state.assignments.size}개`;
+      console.error(`========== [오류 발생] ==========`);
+      console.error(`에러 메시지: ${errorMsg}`);
+      console.error(`스택:\n${err instanceof Error ? err.stack : '없음'}`);
+      console.error(`========== [디버그 로그] ==========`);
+      console.error(logBuffer.join('\n'));
+      console.error(`========================================\n`);
       
-      console.error(`[내보내기 실패] ${fullError}`);
-      console.error("Full error object:", err);
-      
-      setError(`엑셀 파일 생성 실패: ${errorMsg}\n\n해결 방법:\n1. 브라우저 콘솔 로그 확인\n2. 파일 크기를 줄여보기\n3. 이미지 해상도 낮추기`);
+      setError(`❌ 엑셀 파일 생성 실패\n\n에러: ${errorMsg}\n\n📋 진단:\n- 브라우저 개발자 도구(F12) → 콘솔 탭에서 위의 디버그 로그 확인\n- 파일 크기 줄이기\n- 이미지 해상도 낮추기\n- 장수 적게 하기`);
     } finally {
+      console.log = originalLog;
       setProcessing(false);
     }
   };
