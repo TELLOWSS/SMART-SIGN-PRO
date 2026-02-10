@@ -312,13 +312,25 @@ export const autoMatchSignatures = (
 };
 
 /**
+ * 컬럼 문자(A, B, AA, AB 등)를 숫자로 변환
+ * @example "A" => 1, "Z" => 26, "AA" => 27
+ */
+const columnLetterToNumber = (col: string): number => {
+  let result = 0;
+  for (let i = 0; i < col.length; i++) {
+    result = result * 26 + (col.charCodeAt(i) - 64);
+  }
+  return result;
+};
+
+/**
  * 최종 엑셀 생성 - 원본 파일 구조 완벽 보존
  * 
- * 전략변경:
- * 1. 원본 파일을 직접 로드하고 수정
- * 2. 병합된 셀 완벽 유지
- * 3. 인쇄영역 설정 유지
- * 4. 이미지와 텍스트만 추가/수정
+ * 전략:
+ * 1. 원본 파일을 직접 로드
+ * 2. 병합된 셀/인쇄영역은 절대 조작하지 않음 (조작 시 XML 손상)
+ * 3. 이미지와 텍스트만 추가/수정
+ * 4. 서명은 인쇄영역 내에만 배치
  * 5. 최소한의 변경으로 구조 손상 방지
  */
 export const generateFinalExcel = async (
@@ -348,25 +360,25 @@ export const generateFinalExcel = async (
 
   console.log(`[로드완료] 행: ${worksheet.actualRowCount}, 열: ${worksheet.actualColumnCount}, 워크시트 수: ${workbook.worksheets.length}`);
 
-  // 병합된 셀 정보 저장 (보존용)
+  // 병합된 셀 정보 읽기 (읽기만 - 조작 금지!)
   const originalMergedCells = worksheet.merged ? [...worksheet.merged] : [];
-  console.log(`[병합셀] 원본 병합된 셀: ${originalMergedCells.length}개`);
+  console.log(`[병합셀] 원본 병합된 셀: ${originalMergedCells.length}개 (읽기만, 조작 금지)`);
   for (const merge of originalMergedCells) {
     console.log(`  - ${merge}`);
   }
 
-  // 인쇄영역 정보 저장
+  // 인쇄영역 정보 읽기 (읽기만 - 조작 금지!)
   const originalPrintArea = worksheet.pageSetup?.printArea;
-  console.log(`[인쇄영역] 원본 인쇄영역: ${originalPrintArea || '설정 안 됨'}`);
+  console.log(`[인쇄영역] 원본 인쇄영역: ${originalPrintArea || '설정 안 됨'} (읽기만, 조작 금지)`);
 
   // 여러 워크시트 문제 체크
   if (workbook.worksheets.length > 1) {
     console.warn(`⚠️ 경고: 원본 파일에 ${workbook.worksheets.length}개 시트가 있습니다.`);
   }
 
-  // 인쇄영역 범위 파싱
-  let printAreaRows = { start: 1, end: worksheet.rowCount };
-  let printAreaCols = { start: 1, end: worksheet.columnCount };
+  // 인쇄영역 범위 파싱 (서명 배치 범위 제한용)
+  let printAreaRows = { start: 1, end: worksheet.actualRowCount || 1000 };
+  let printAreaCols = { start: 1, end: worksheet.actualColumnCount || 26 };
   
   if (originalPrintArea) {
     try {
@@ -374,12 +386,13 @@ export const generateFinalExcel = async (
       const range = originalPrintArea.split('!').pop() || originalPrintArea;
       const [topLeft, bottomRight] = range.split(':');
       if (topLeft && bottomRight) {
-        const tlMatch = topLeft.match(/([A-Z]+)(\d+)/);
-        const brMatch = bottomRight.match(/([A-Z]+)(\d+)/);
+        const tlMatch = topLeft.match(/([A-Z]+)(\d+)/i);
+        const brMatch = bottomRight.match(/([A-Z]+)(\d+)/i);
         if (tlMatch && brMatch) {
-          const colToNum = (col: string) => col.charCodeAt(0) - 64; // 'A'=1, 'B'=2 등
+          const tlCol = columnLetterToNumber(tlMatch[1].toUpperCase());
+          const brCol = columnLetterToNumber(brMatch[1].toUpperCase());
           printAreaRows = { start: parseInt(tlMatch[2]), end: parseInt(brMatch[2]) };
-          printAreaCols = { start: colToNum(tlMatch[1]), end: colToNum(brMatch[1]) };
+          printAreaCols = { start: tlCol, end: brCol };
           console.log(`[인쇄영역파싱] 행: ${printAreaRows.start}-${printAreaRows.end}, 열: ${printAreaCols.start}-${printAreaCols.end}`);
         }
       }
@@ -584,46 +597,12 @@ export const generateFinalExcel = async (
   console.log(`  스킵: ${skippedCount}개`);
   console.log(`  캐시됨: ${assignmentValues.length - processedCount - failureCount - skippedCount}개`);
 
-  // Step 3: 병합된 셀 및 인쇄영역 복원
-  console.log(`[복원] 병합된 셀 및 인쇄영역 복원 중...`);
+  // Step 3: 병합된 셀 및 인쇄영역 복원은 무조건 제거!
+  // ExcelJS가 병합/언머지를 할 때 XML을 손상시킵니다.
+  // 해결책: 원본 파일을 로드하면 이미 병합/인쇄영역이 있으므로,
+  // 조작하지 않으면 ExcelJS가 저장할 때 자동으로 유지합니다.
+  console.log(`[주의] 병합된 셀과 인쇄영역은 의도적으로 조작하지 않습니다 (원본 유지).`);
   
-  // 기존 병합 셀 제거 (ExcelJS 재저장 중 손상 방지)
-  if (worksheet.merged && worksheet.merged.length > 0) {
-    console.log(`  [제거] 현재 병합 셀 ${worksheet.merged.length}개 제거`);
-    const mergedCopy = [...worksheet.merged];
-    for (const merge of mergedCopy) {
-      try {
-        worksheet.unmerge(merge);
-      } catch (e) {
-        console.warn(`  ⚠️ Unmerge 실패: ${merge}`, e);
-      }
-    }
-  }
-
-  // 원본 병합 셀 복원
-  for (const merge of originalMergedCells) {
-    try {
-      worksheet.merge(merge);
-      console.log(`  ✓ 병합 복원: ${merge}`);
-    } catch (e) {
-      console.warn(`  ✗ 병합 복원 실패: ${merge}`, e);
-    }
-  }
-
-  // 인쇄영역 복원
-  if (originalPrintArea) {
-    try {
-      if (!worksheet.pageSetup) {
-        worksheet.pageSetup = {};
-      }
-      worksheet.pageSetup.printArea = originalPrintArea;
-      console.log(`  ✓ 인쇄영역 복원: ${originalPrintArea}`);
-    } catch (e) {
-      console.warn(`  ✗ 인쇄영역 복원 실패:`, e);
-    }
-  }
-
-  // Step 4: 워크북 저장
   // Step 4: 워크북 저장
   try {
     console.log(`[저장중] 워크북을 버퍼로 쓰고 있습니다...`);
