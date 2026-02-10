@@ -38,6 +38,13 @@ export default function App() {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    // Validate file type
+    if (!file.name.endsWith('.xlsx') && !file.type.includes('spreadsheet')) {
+      setError("XLSX 파일만 지원합니다. 파일 확장명을 확인해주세요.");
+      if (excelInputRef.current) excelInputRef.current.value = '';
+      return;
+    }
+
     // Check file size (Warning if > 5MB)
     if (file.size > 5 * 1024 * 1024) {
       if (!window.confirm(`선택하신 엑셀 파일의 용량이 큽니다 (${(file.size / 1024 / 1024).toFixed(1)}MB).\n파일 내에 이미지가 많거나 행이 매우 많으면 'Out of Memory' 오류가 발생할 수 있습니다.\n\n계속 진행하시겠습니까?`)) {
@@ -48,16 +55,27 @@ export default function App() {
 
     try {
       setProcessing(true);
-      const buffer = await file.arrayBuffer();
-      const sheetData = await parseExcelFile(buffer);
-      setState(prev => ({ ...prev, excelFile: file, excelBuffer: buffer, sheetData }));
       setError(null);
+      const buffer = await file.arrayBuffer();
+      
+      if (buffer.byteLength === 0) {
+        throw new Error("파일이 비어있습니다.");
+      }
+
+      const sheetData = await parseExcelFile(buffer);
+      
+      if (sheetData.rows.length === 0) {
+        throw new Error("데이터가 없는 파일입니다. 성명 열과 데이터가 포함된 파일을 확인해주세요.");
+      }
+
+      setState(prev => ({ ...prev, excelFile: file, excelBuffer: buffer, sheetData, step: 'upload' }));
+      setToast({ msg: `${file.name} 로드됨 (${sheetData.rows.length}개 행)`, type: 'success' });
     } catch (err) {
-      setError("엑셀 파일을 읽는 중 오류가 발생했습니다. 유효한 .xlsx 파일인지 확인해주세요.");
-      console.error(err);
+      const errorMsg = err instanceof Error ? err.message : "알 수 없는 오류";
+      setError(`엑셀 파일 읽기 실패: ${errorMsg}`);
+      console.error('Excel upload error:', err);
     } finally {
       setProcessing(false);
-      // Don't clear input immediately here to allow user to see the file name
     }
   };
 
@@ -68,84 +86,131 @@ export default function App() {
     setProcessing(true);
     const newSignatures = new Map<string, SignatureFile[]>(state.signatures);
     let count = 0;
+    const failedFiles: string[] = [];
 
-    // Process files in chunks to avoid UI freeze, but here we just loop async
-    // Using Blob URLs is fast enough to loop directly
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
       // Only images
-      if (!file.type.startsWith('image/')) continue;
-
-      // --- MEMORY FIX: Use Blob URL instead of reading file content ---
-      const objectUrl = URL.createObjectURL(file);
-
-      // We need dimensions to calculate aspect ratio later, but we load it lightly
-      const getImageDims = () => new Promise<{w: number, h: number}>((resolve) => {
-         const img = new Image();
-         img.onload = () => resolve({ w: img.width, h: img.height });
-         img.onerror = () => resolve({ w: 100, h: 50 }); // Fallback
-         img.src = objectUrl;
-      });
-
-      const { w, h } = await getImageDims();
-
-      // Parse name logic:
-      const fileNameNoExt = file.name.substring(0, file.name.lastIndexOf('.'));
-      const lastUnderscoreIdx = fileNameNoExt.lastIndexOf('_');
-      
-      let baseNameString = fileNameNoExt;
-      if (lastUnderscoreIdx > 0) {
-        baseNameString = fileNameNoExt.substring(0, lastUnderscoreIdx);
+      if (!file.type.startsWith('image/')) {
+        failedFiles.push(`${file.name} (이미지 파일이 아님)`);
+        continue;
       }
 
-      const baseName = normalizeName(baseNameString);
-      
-      const sigFile: SignatureFile = {
-        name: baseName,
-        variant: file.name,
-        previewUrl: objectUrl, // Store lightweight URL
-        width: w,
-        height: h
-      };
+      // File size check (warning if > 2MB per image)
+      if (file.size > 2 * 1024 * 1024) {
+        failedFiles.push(`${file.name} (2MB 초과 - 압축 권장)`);
+        continue;
+      }
 
-      const list: SignatureFile[] = newSignatures.get(sigFile.name) || [];
-      // Avoid duplicates
-      if (!list.find(s => s.variant === sigFile.variant)) {
-        list.push(sigFile);
-        newSignatures.set(sigFile.name, list);
-        count++;
-      } else {
-        // If duplicate, revoke the new URL to save memory
+      const objectUrl = URL.createObjectURL(file);
+
+      try {
+        const getImageDims = () => new Promise<{w: number, h: number}>((resolve) => {
+          const img = new Image();
+          img.onload = () => resolve({ w: img.width, h: img.height });
+          img.onerror = () => {
+            URL.revokeObjectURL(objectUrl);
+            resolve({ w: 100, h: 50 });
+          };
+          img.src = objectUrl;
+        });
+
+        const { w, h } = await getImageDims();
+
+        if (w === 100 && h === 50) {
+          failedFiles.push(`${file.name} (이미지 로드 실패)`);
+          continue;
+        }
+
+        // Parse name logic:
+        const fileNameNoExt = file.name.substring(0, file.name.lastIndexOf('.'));
+        const lastUnderscoreIdx = fileNameNoExt.lastIndexOf('_');
+        
+        let baseNameString = fileNameNoExt;
+        if (lastUnderscoreIdx > 0) {
+          baseNameString = fileNameNoExt.substring(0, lastUnderscoreIdx);
+        }
+
+        const baseName = normalizeName(baseNameString);
+        
+        if (!baseName) {
+          failedFiles.push(`${file.name} (이름 파싱 불가)`);
+          URL.revokeObjectURL(objectUrl);
+          continue;
+        }
+        
+        const sigFile: SignatureFile = {
+          name: baseName,
+          variant: file.name,
+          previewUrl: objectUrl,
+          width: w,
+          height: h
+        };
+
+        const list: SignatureFile[] = newSignatures.get(sigFile.name) || [];
+        if (!list.find(s => s.variant === sigFile.variant)) {
+          list.push(sigFile);
+          newSignatures.set(sigFile.name, list);
+          count++;
+        } else {
+          URL.revokeObjectURL(objectUrl);
+          failedFiles.push(`${file.name} (중복)`);
+        }
+      } catch (err) {
+        console.error('Image upload error:', err);
         URL.revokeObjectURL(objectUrl);
+        failedFiles.push(`${file.name} (처리 실패)`);
       }
     }
 
     setState(prev => ({ ...prev, signatures: newSignatures }));
     setProcessing(false);
     if (sigInputRef.current) sigInputRef.current.value = '';
-    setToast({ msg: `${count}개의 서명이 추가되었습니다.`, type: 'success' });
+    
+    const toastMsg = failedFiles.length > 0 
+      ? `${count}개 추가됨${failedFiles.length > 0 ? ` (${failedFiles.length}개 제외됨: ${failedFiles.slice(0, 2).join(', ')}${failedFiles.length > 2 ? '...' : ''})` : ''}`
+      : `${count}개의 서명이 추가되었습니다.`;
+    
+    setToast({ msg: toastMsg, type: count > 0 ? 'success' : 'info' });
   };
 
   const runAutoMatch = () => {
-    if (!state.sheetData) return;
+    if (!state.sheetData) {
+      setError("엑셀 파일이 없습니다.");
+      return;
+    }
+
+    if (state.signatures.size === 0) {
+      setError("업로드된 서명이 없습니다. 서명 이미지를 먼저 추가해주세요.");
+      return;
+    }
+
     setProcessing(true);
-    // Timeout to allow UI to show processing state
     setTimeout(() => {
         const assignments = autoMatchSignatures(state.sheetData, state.signatures);
         setState(prev => ({ ...prev, assignments, step: 'preview' }));
         setProcessing(false);
-        setToast({ msg: '서명이 무작위로 재배치되었습니다.', type: 'info' });
+        
+        if (assignments.size === 0) {
+          setError("매칭된 서명이 없습니다. 엑셀 파일에 '성명' 열과 서명 기호(1)가 있는지 확인해주세요.");
+          setToast({ msg: '⚠️ 매칭 실패', type: 'info' });
+        } else {
+          const signatureCount = new Set(Array.from(assignments.values()).map(a => a.signatureBaseName)).size;
+          setToast({ msg: `✅ ${assignments.size}개 위치에 ${signatureCount}명의 서명이 배치되었습니다`, type: 'success' });
+        }
     }, 100);
   };
 
   const handleExport = async (isRetry: boolean = false) => {
-    if (!state.excelBuffer) return;
+    if (!state.excelBuffer || !state.sheetData) return;
+    
+    if (state.assignments.size === 0) {
+      setError("배치된 서명이 없습니다. 자동 매칭을 수행해주세요.");
+      return;
+    }
+
     setProcessing(true);
     try {
-      // If retrying/generating new variation, we might want to re-roll matching first if requested?
-      // But user might just want to export the CURRENT preview.
-      // If calling from Export screen "Generate Another", we should probably re-roll first.
-      
       let assignmentsToUse = state.assignments;
       if (isRetry && state.sheetData) {
         assignmentsToUse = autoMatchSignatures(state.sheetData, state.signatures);
@@ -153,6 +218,11 @@ export default function App() {
       }
 
       const blob = await generateFinalExcel(state.excelBuffer, assignmentsToUse, state.signatures);
+      
+      if (!blob || blob.size === 0) {
+        throw new Error("생성된 파일이 비어있습니다.");
+      }
+
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -165,27 +235,43 @@ export default function App() {
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
-      URL.revokeObjectURL(url);
+      
+      // Clean up after a delay to allow download to start
+      setTimeout(() => {
+        URL.revokeObjectURL(url);
+      }, 100);
       
       setState(prev => ({ ...prev, step: 'export' }));
       setToast({ msg: `파일이 생성되었습니다: ${filename}`, type: 'success' });
+      setError(null);
     } catch (err) {
-      console.error(err);
-      setError("엑셀 파일 생성에 실패했습니다. 메모리가 부족하여 브라우저가 중단되었을 수 있습니다. 작업을 나누거나 이미지를 줄여주세요.");
+      const errorMsg = err instanceof Error ? err.message : "알 수 없는 오류";
+      setError(`엑셀 파일 생성 실패: ${errorMsg}\n\n해결 방법: 파일 크기를 줄이거나 이미지를 압축해주세요.`);
+      console.error('Export error:', err);
     } finally {
       setProcessing(false);
     }
   };
 
+  const cleanupBlobUrls = (signatures: Map<string, SignatureFile[]>) => {
+    signatures.forEach(list => {
+      list.forEach(s => {
+        try {
+          URL.revokeObjectURL(s.previewUrl);
+        } catch (e) {
+          console.warn("Failed to revoke object URL:", e);
+        }
+      });
+    });
+  };
+
   const handleReset = () => {
     if (window.confirm("정말로 처음부터 다시 시작하시겠습니까?\n모든 데이터가 초기화됩니다.")) {
       // Cleanup existing blob URLs
-      state.signatures.forEach(list => {
-        list.forEach(s => URL.revokeObjectURL(s.previewUrl));
-      });
+      cleanupBlobUrls(state.signatures);
       
       setState(getInitialState());
-      // Refs will be reset when component re-renders due to key prop
+      setError(null);
       setToast({ msg: '초기화되었습니다.', type: 'info' });
     }
   };
@@ -284,44 +370,43 @@ export default function App() {
     return (
       <div className="flex flex-col h-[calc(100vh-100px)]">
         {/* Toolbar */}
-        <div className="bg-white p-4 shadow-sm border-b flex justify-between items-center z-10">
-          <div className="flex items-center gap-4">
-            <h2 className="text-xl font-bold text-gray-800">미리보기 및 편집</h2>
+        <div className="bg-white p-4 shadow-sm border-b flex justify-between items-center z-10 flex-wrap gap-3">
+          <div className="flex items-center gap-4 flex-wrap">
+            <h2 className="text-lg sm:text-xl font-bold text-gray-800">미리보기 및 편집</h2>
             <span className="bg-blue-100 text-blue-800 text-xs px-3 py-1 rounded-full font-medium">
-              {state.assignments.size}개 서명 배치됨
+              {state.assignments.size}개 배치 / {state.sheetData.rows.length}행
             </span>
           </div>
-          <div className="flex gap-3">
-             <button onClick={runAutoMatch} className="px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg flex items-center gap-2">
-              <RefreshCw size={16} /> 무작위 재설정
+          <div className="flex gap-2 flex-wrap">
+             <button onClick={runAutoMatch} className="px-3 py-2 text-xs sm:text-sm text-gray-600 hover:bg-gray-100 rounded-lg flex items-center gap-1 whitespace-nowrap">
+              <RefreshCw size={16} /> 재설정
             </button>
-            <button onClick={handleReset} className="px-4 py-2 text-sm text-red-600 hover:bg-red-50 rounded-lg flex items-center gap-2">
-              <RotateCcw size={16} /> 처음부터 다시
+            <button onClick={handleReset} className="px-3 py-2 text-xs sm:text-sm text-red-600 hover:bg-red-50 rounded-lg flex items-center gap-1 whitespace-nowrap">
+              <RotateCcw size={16} /> 초기화
             </button>
             <button 
               onClick={() => handleExport(false)}
               disabled={processing}
-              className="bg-green-600 text-white px-6 py-2 rounded-lg font-semibold hover:bg-green-700 flex items-center gap-2 shadow-md"
+              className="bg-green-600 text-white px-4 py-2 text-xs sm:text-sm rounded-lg font-semibold hover:bg-green-700 flex items-center gap-1 shadow-md disabled:opacity-50 whitespace-nowrap"
             >
-              {processing ? <RefreshCw className="animate-spin" size={18} /> : <Download size={18} />}
-              최종 엑셀 내보내기
+              {processing ? <RefreshCw className="animate-spin" size={16} /> : <Download size={16} />}
+              다운로드
             </button>
           </div>
         </div>
 
-        {/* Table View */}
-        <div className="flex-1 overflow-auto bg-gray-100 p-8 custom-scrollbar relative">
+        {/* Table View with optimizations for mobile */}
+        <div className="flex-1 overflow-auto bg-gray-100 p-2 sm:p-8 custom-scrollbar relative">
           <div className="bg-white shadow-xl rounded-sm overflow-hidden inline-block min-w-full">
-            <table className="border-collapse w-full table-fixed">
+            <table className="border-collapse w-full table-auto sm:table-fixed">
               <tbody>
                 {state.sheetData.rows.map((row) => (
-                  <tr key={row.index} className="h-10 border-b border-gray-200 hover:bg-gray-50">
-                    {/* Render cells. Assuming max 20 columns for performance or dynamic */}
-                    {row.cells.map((cell) => {
+                  <tr key={row.index} className="h-12 sm:h-10 border-b border-gray-200 hover:bg-gray-50">
+                    {/* Render cells optimized for mobile */}
+                    {row.cells.slice(0, 12).map((cell) => {  // Limit columns for mobile performance
                       const assignKey = `${cell.row}:${cell.col}`;
                       const assignment = state.assignments.get(assignKey);
                       
-                      // Find signature image url if assigned
                       let sigImgUrl = null;
                       if (assignment) {
                          const sigs = state.signatures.get(assignment.signatureBaseName);
@@ -332,15 +417,15 @@ export default function App() {
                       return (
                         <td 
                           key={cell.address} 
-                          className={`border-r border-gray-200 px-2 py-1 text-sm relative min-w-[80px] ${assignment ? 'bg-blue-50/30' : ''}`}
-                          title={`값: ${cell.value} | 행: ${cell.row}`}
+                          className={`border-r border-gray-200 px-2 py-1 text-xs sm:text-sm relative min-w-[60px] sm:min-w-[80px] ${assignment ? 'bg-blue-50/30' : ''}`}
+                          title={`값: ${cell.value}`}
                         >
-                          <div className="relative w-full h-full min-h-[30px] flex items-center">
-                            <span className="z-0 text-gray-400 select-none truncate max-w-full">
+                          <div className="relative w-full h-full min-h-[40px] sm:min-h-[30px] flex items-center">
+                            <span className="z-0 text-gray-400 select-none truncate max-w-full text-xs">
                               {cell.value}
                             </span>
                             
-                            {/* Overlay Signature */}
+                            {/* Overlay Signature with better sizing */}
                             {assignment && sigImgUrl && (
                               <div 
                                 className="absolute inset-0 z-10 flex items-center justify-center cursor-pointer group"
@@ -351,12 +436,13 @@ export default function App() {
                                   className="pointer-events-none drop-shadow-sm mix-blend-multiply transition-transform duration-300"
                                   style={{
                                     transform: `rotate(${assignment.rotation}deg) scale(${assignment.scale}) translate(${assignment.offsetX}px, ${assignment.offsetY}px)`,
-                                    maxWidth: '120%', 
-                                    maxHeight: '120%'
+                                    maxWidth: '130%', 
+                                    maxHeight: '130%',
+                                    objectFit: 'contain'
                                   }}
                                 />
-                                <div className="hidden group-hover:block absolute -top-8 left-0 bg-black text-white text-xs p-1 rounded whitespace-nowrap z-20">
-                                  {assignment.signatureVariantId}
+                                <div className="hidden group-hover:block absolute -top-8 left-0 bg-black text-white text-xs p-1 rounded whitespace-nowrap z-20 text-xs">
+                                  {assignment.signatureVariantId.substring(0, 15)}
                                 </div>
                               </div>
                             )}
@@ -369,6 +455,9 @@ export default function App() {
               </tbody>
             </table>
           </div>
+          {state.sheetData.rows[0]?.cells.length > 12 && (
+            <p className="text-xs text-gray-500 mt-2 text-center">📱 모바일에서는 처음 12개 열만 표시됩니다</p>
+          )}
         </div>
       </div>
     );
@@ -448,10 +537,18 @@ export default function App() {
       {/* Main Content */}
       <main className="w-full">
         {error && (
-          <div className="max-w-4xl mx-auto mt-6 bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded-lg flex items-center gap-3">
-            <AlertCircle size={20} />
-            {error}
-            <button onClick={() => setError(null)} className="ml-auto text-sm underline">닫기</button>
+          <div className="max-w-4xl mx-auto mt-6 bg-red-50 border-l-4 border-red-500 text-red-800 px-6 py-4 rounded flex items-start gap-4 shadow-sm">
+            <AlertCircle size={24} className="flex-shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="font-semibold text-base mb-1">오류 발생</p>
+              <p className="text-sm whitespace-pre-wrap">{error}</p>
+            </div>
+            <button 
+              onClick={() => setError(null)} 
+              className="ml-auto text-red-600 hover:text-red-800 flex-shrink-0"
+            >
+              <X size={20} />
+            </button>
           </div>
         )}
 
@@ -465,8 +562,15 @@ export default function App() {
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center backdrop-blur-sm">
           <div className="bg-white p-8 rounded-2xl shadow-2xl flex flex-col items-center">
             <RefreshCw className="animate-spin text-indigo-600 mb-4" size={48} />
-            <h3 className="text-lg font-semibold">처리 중...</h3>
-            <p className="text-sm text-gray-500">잠시만 기다려주세요</p>
+            <h3 className="text-lg font-semibold text-gray-900">처리 중...</h3>
+            <p className="text-sm text-gray-500 mt-2">
+              {state.step === 'upload' && '파일을 분석하고 있습니다'}
+              {state.step === 'preview' && '서명을 무작위로 배치하고 있습니다'}
+              {state.step === 'export' && '엑셀 파일을 생성하고 있습니다'}
+            </p>
+            <div className="w-48 h-1 bg-gray-200 rounded-full mt-4 overflow-hidden">
+              <div className="h-full bg-indigo-600 animate-pulse"></div>
+            </div>
           </div>
         </div>
       )}
@@ -517,11 +621,42 @@ export default function App() {
                 </div>
               </div>
               <div className="p-8 space-y-8">
-                <p className="text-gray-600">서명 이미지 파일명은 <code>홍길동_1.png</code>, <code>홍길동_2.png</code> 와 같이 설정해주세요.</p>
-                <div className="bg-gray-100 p-4 rounded-lg text-sm text-gray-700">
-                  <strong>TIP:</strong><br/>
-                  - 엑셀 파일은 Microsoft Excel 표준 형식을 권장합니다.<br/>
-                  - '다른 랜덤 버전 즉시 다운로드' 버튼을 사용하면, 같은 파일에 대해 서명 배치를 새로 무작위로 섞어서 즉시 다운로드할 수 있습니다.
+                <div className="space-y-4">
+                  <h4 className="font-bold text-gray-900">📝 서명 파일명 규칙 (필수)</h4>
+                  <p className="text-sm text-gray-600">서명 이미지 파일명은 반드시 <span className="bg-gray-200 px-2 py-0.5 rounded font-mono">사람이름_숫자.확장자</span> 형태여야 합니다.</p>
+                  <ul className="text-sm text-gray-600 space-y-1 ml-4">
+                    <li>✅ 올바른 예: <code className="bg-green-100 px-1 text-green-800">홍길동_1.png</code>, <code className="bg-green-100 px-1 text-green-800">김철수_2.jpg</code></li>
+                    <li>❌ 잘못된 예: <code className="bg-red-100 px-1 text-red-800">홍길동.png</code>, <code className="bg-red-100 px-1 text-red-800">signature.jpg</code></li>
+                  </ul>
+                </div>
+
+                <div className="space-y-4">
+                  <h4 className="font-bold text-gray-900">📊 엑셀 파일 형식 요구사항</h4>
+                  <ul className="text-sm text-gray-600 space-y-2">
+                    <li>• <strong>필수 열:</strong> '성명' 또는 '이름' 열이 있어야 합니다</li>
+                    <li>• <strong>서명 기호:</strong> 서명이 필요한 곳에 '1', '(1)', '1.', '1)' 중 하나 입력</li>
+                    <li>• <strong>파일 형식:</strong> Microsoft Excel (.xlsx) 형식만 지원</li>
+                    <li>• <strong>파일 크기:</strong> 5MB 이하 권장 (이미지 포함 시)</li>
+                  </ul>
+                </div>
+
+                <div className="space-y-4">
+                  <h4 className="font-bold text-gray-900">🎯 주요 기능</h4>
+                  <ul className="text-sm text-gray-600 space-y-2">
+                    <li>• <strong>자동 매칭:</strong> 엑셀의 이름과 서명 파일명을 자동으로 매칭</li>
+                    <li>• <strong>무작위 배치:</strong> 같은 사람의 서명이 다른 버전으로 무작위 배치</li>
+                    <li>• <strong>다중 버전:</strong> 원본 파일을 보존하고 여러 버전 생성 가능</li>
+                    <li>• <strong>스타일 보존:</strong> 원본 엑셀의 모든 포맷팅과 스타일이 유지됨</li>
+                  </ul>
+                </div>
+
+                <div className="bg-blue-50 p-4 rounded-lg text-sm text-blue-900 space-y-2">
+                  <strong>💡 팁:</strong>
+                  <ul className="space-y-1">
+                    <li>• 같은 사람의 서명이 많을수록 더 자연스러운 무작위 배치가 가능합니다</li>
+                    <li>• '다른 랜덤 버전 즉시 다운로드' 버튼으로 빠르게 새 버전을 생성할 수 있습니다</li>
+                    <li>• 서명 이미지는 PNG, JPG 형식을 권장합니다</li>
+                  </ul>
                 </div>
               </div>
             </div>
