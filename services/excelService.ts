@@ -316,9 +316,10 @@ export const autoMatchSignatures = (
  * 
  * 전략변경:
  * 1. 원본 파일을 직접 로드하고 수정
- * 2. 기존 모든 페이지 레이아웃/관계 유지
- * 3. 이미지와 텍스트만 추가/수정
- * 4. 최소한의 변경으로 구조 손상 방지
+ * 2. 병합된 셀 완벽 유지
+ * 3. 인쇄영역 설정 유지
+ * 4. 이미지와 텍스트만 추가/수정
+ * 5. 최소한의 변경으로 구조 손상 방지
  */
 export const generateFinalExcel = async (
   originalBuffer: ArrayBuffer,
@@ -347,9 +348,44 @@ export const generateFinalExcel = async (
 
   console.log(`[로드완료] 행: ${worksheet.actualRowCount}, 열: ${worksheet.actualColumnCount}, 워크시트 수: ${workbook.worksheets.length}`);
 
+  // 병합된 셀 정보 저장 (보존용)
+  const originalMergedCells = worksheet.merged ? [...worksheet.merged] : [];
+  console.log(`[병합셀] 원본 병합된 셀: ${originalMergedCells.length}개`);
+  for (const merge of originalMergedCells) {
+    console.log(`  - ${merge}`);
+  }
+
+  // 인쇄영역 정보 저장
+  const originalPrintArea = worksheet.pageSetup?.printArea;
+  console.log(`[인쇄영역] 원본 인쇄영역: ${originalPrintArea || '설정 안 됨'}`);
+
   // 여러 워크시트 문제 체크
   if (workbook.worksheets.length > 1) {
     console.warn(`⚠️ 경고: 원본 파일에 ${workbook.worksheets.length}개 시트가 있습니다.`);
+  }
+
+  // 인쇄영역 범위 파싱
+  let printAreaRows = { start: 1, end: worksheet.rowCount };
+  let printAreaCols = { start: 1, end: worksheet.columnCount };
+  
+  if (originalPrintArea) {
+    try {
+      // printArea 형식: "A1:C10" 또는 "Sheet1!A1:C10"
+      const range = originalPrintArea.split('!').pop() || originalPrintArea;
+      const [topLeft, bottomRight] = range.split(':');
+      if (topLeft && bottomRight) {
+        const tlMatch = topLeft.match(/([A-Z]+)(\d+)/);
+        const brMatch = bottomRight.match(/([A-Z]+)(\d+)/);
+        if (tlMatch && brMatch) {
+          const colToNum = (col: string) => col.charCodeAt(0) - 64; // 'A'=1, 'B'=2 등
+          printAreaRows = { start: parseInt(tlMatch[2]), end: parseInt(brMatch[2]) };
+          printAreaCols = { start: colToNum(tlMatch[1]), end: colToNum(brMatch[1]) };
+          console.log(`[인쇄영역파싱] 행: ${printAreaRows.start}-${printAreaRows.end}, 열: ${printAreaCols.start}-${printAreaCols.end}`);
+        }
+      }
+    } catch (parseErr) {
+      console.warn(`[인쇄영역파싱실패]`, parseErr);
+    }
   }
 
   // Step 2: 할당된 서명 처리
@@ -364,6 +400,12 @@ export const generateFinalExcel = async (
     return list?.find(s => s.variant === variant);
   };
 
+  // 좌표가 인쇄영역 내인지 확인
+  const isInPrintArea = (row: number, col: number) => {
+    return row >= printAreaRows.start && row <= printAreaRows.end &&
+           col >= printAreaCols.start && col <= printAreaCols.end;
+  };
+
   // 이미지 추가 전에 선택된 셀만 먼저 텍스트 정리
   console.log(`[사전처리] placeholder 텍스트 제거 중...`);
   for (const [key, assignment] of assignments) {
@@ -371,6 +413,13 @@ export const generateFinalExcel = async (
       const [rowStr, colStr] = key.split(':');
       const row = parseInt(rowStr, 10);
       const col = parseInt(colStr, 10);
+
+      // 인쇄영역 범위 확인
+      if (!isInPrintArea(row, col)) {
+        console.log(`  ⊘ (${row},${col}) 인쇄영역 밖 - 스킵`);
+        skippedCount++;
+        continue;
+      }
 
       const cell = worksheet.getCell(row, col);
       if (cell) {
@@ -400,6 +449,14 @@ export const generateFinalExcel = async (
 
     try {
       const assignment = assignmentValues[i];
+
+      // 인쇄영역 범위 확인
+      if (!isInPrintArea(assignment.row, assignment.col)) {
+        console.log(`  ⊘ (${assignment.row},${assignment.col}) 인쇄영역 밖 - 스킵`);
+        skippedCount++;
+        continue;
+      }
+
       const sigFile = findSigFile(assignment.signatureBaseName, assignment.signatureVariantId);
       
       if (!sigFile) {
@@ -524,9 +581,50 @@ export const generateFinalExcel = async (
   console.log(`[완료] 서명 배치 결과:`);
   console.log(`  성공: ${processedCount}개`);
   console.log(`  실패: ${failureCount}개`);
-  console.log(`  캐시됨: ${assignmentValues.length - processedCount - failureCount}개`);
+  console.log(`  스킵: ${skippedCount}개`);
+  console.log(`  캐시됨: ${assignmentValues.length - processedCount - failureCount - skippedCount}개`);
 
-  // Step 3: 워크북 저장
+  // Step 3: 병합된 셀 및 인쇄영역 복원
+  console.log(`[복원] 병합된 셀 및 인쇄영역 복원 중...`);
+  
+  // 기존 병합 셀 제거 (ExcelJS 재저장 중 손상 방지)
+  if (worksheet.merged && worksheet.merged.length > 0) {
+    console.log(`  [제거] 현재 병합 셀 ${worksheet.merged.length}개 제거`);
+    const mergedCopy = [...worksheet.merged];
+    for (const merge of mergedCopy) {
+      try {
+        worksheet.unmerge(merge);
+      } catch (e) {
+        console.warn(`  ⚠️ Unmerge 실패: ${merge}`, e);
+      }
+    }
+  }
+
+  // 원본 병합 셀 복원
+  for (const merge of originalMergedCells) {
+    try {
+      worksheet.merge(merge);
+      console.log(`  ✓ 병합 복원: ${merge}`);
+    } catch (e) {
+      console.warn(`  ✗ 병합 복원 실패: ${merge}`, e);
+    }
+  }
+
+  // 인쇄영역 복원
+  if (originalPrintArea) {
+    try {
+      if (!worksheet.pageSetup) {
+        worksheet.pageSetup = {};
+      }
+      worksheet.pageSetup.printArea = originalPrintArea;
+      console.log(`  ✓ 인쇄영역 복원: ${originalPrintArea}`);
+    } catch (e) {
+      console.warn(`  ✗ 인쇄영역 복원 실패:`, e);
+    }
+  }
+
+  // Step 4: 워크북 저장
+  // Step 4: 워크북 저장
   try {
     console.log(`[저장중] 워크북을 버퍼로 쓰고 있습니다...`);
     
