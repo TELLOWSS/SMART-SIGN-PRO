@@ -217,7 +217,7 @@ export const parseExcelFile = async (buffer: ArrayBuffer): Promise<SheetData> =>
 
 /**
  * 서명 자동 매칭 로직
- * 개선사항: 더 나은 열 검색, 에러 처리, 결과 보고
+ * 개선사항: 더 나은 열 검색, 에러 처리, 결과 보고, 병합셀 인식
  */
 export const autoMatchSignatures = (
   sheetData: SheetData,
@@ -234,6 +234,9 @@ export const autoMatchSignatures = (
     console.warn("업로드된 서명이 없습니다.");
     return assignments;
   }
+  
+  const mergedCells = sheetData.mergedCells || [];
+  console.log(`[autoMatch] 병합된 셀: ${mergedCells.length}개`);
   
   let nameColIndex = -1;
   let headerRowIndex = -1;
@@ -289,6 +292,14 @@ export const autoMatchSignatures = (
         
         // Check for signature marker
         if (['1', '(1)', '1.', '1)', 'o', 'o)', '○'].includes(cellStr)) {
+          // Skip if cell is in a merged range but not the top-left cell
+          if (isCellInMergedRange(cell.row, cell.col, mergedCells)) {
+            if (!isTopLeftOfMergedCell(cell.row, cell.col, mergedCells)) {
+              console.log(`  [autoMatch] 스킵: (${cell.row},${cell.col}) 병합셀 내부`);
+              continue;
+            }
+          }
+          
           const key = `${cell.row}:${cell.col}`;
           
           const randomSigIndex = Math.floor(Math.random() * availableSigs.length);
@@ -758,6 +769,18 @@ export const generateFinalExcel = async (
   // 조작하지 않으면 ExcelJS가 저장할 때 자동으로 유지합니다.
   console.log(`[주의] 병합된 셀과 인쇄영역은 의도적으로 조작하지 않습니다 (원본 유지).`);
   
+  // 최종 확인: 병합된 셀과 인쇄영역이 여전히 존재하는지 확인
+  const finalMergedCells = worksheet.merged ? [...worksheet.merged] : [];
+  const finalPrintArea = worksheet.pageSetup?.printArea;
+  console.log(`[최종확인] 병합된 셀: ${finalMergedCells.length}개 (원본: ${originalMergedCells.length}개)`);
+  console.log(`[최종확인] 인쇄영역: ${finalPrintArea || '설정 안 됨'} (원본: ${originalPrintArea || '설정 안 됨'})`);
+  
+  if (originalMergedCells.length !== finalMergedCells.length) {
+    console.warn(`⚠️ 경고: 병합된 셀 수가 변경되었습니다!`);
+  }
+  if (originalPrintArea !== finalPrintArea) {
+    console.warn(`⚠️ 경고: 인쇄영역이 변경되었습니다!`);
+  }
   // Step 4: 워크북 저장
   try {
     console.log(`[저장중] 워크북을 버퍼로 쓰고 있습니다...`);
