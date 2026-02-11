@@ -2,9 +2,24 @@
 
 ## What Was Fixed
 
-This update resolves two critical issues with Excel file export:
+This update resolves three critical issues with Excel file export:
 
-### 1. Merged Cell Recognition Problem ✅
+### 1. Merged Cells Lost in Export ✅ [CRITICAL FIX]
+**Problem**: When exporting files with signatures, merged cells were being lost, causing:
+- "파일 오류" (File Error) messages when opening in Excel
+- Merged cells being completely separated/unmerged
+- Content formatting being distorted
+- Files requiring recovery mode to open
+
+**Root Cause**: ExcelJS library bug - when images are added to a workbook, merged cell information can be lost during save operation (documented in ExcelJS issues #2641, #2146, #2755).
+
+**Solution**: 
+- Explicitly preserve merged cell information from original file
+- After adding all signature images, re-apply merged cells to worksheet
+- This ensures merged cells are properly written to the output file
+- Comprehensive logging to track restoration process
+
+### 2. Merged Cell Recognition Problem ✅
 **Problem**: Signatures were being placed in the middle of merged cells, causing Excel errors and corrupted files.
 
 **Solution**: 
@@ -12,7 +27,7 @@ This update resolves two critical issues with Excel file export:
 - Signatures are only placed in the top-left cell of merged ranges
 - Cells within merged ranges (but not the top-left) are automatically skipped
 
-### 2. Print Area Detection ✅
+### 3. Print Area Detection ✅
 **Problem**: Print area settings were not being properly detected, and Excel files with print areas would lose these settings.
 
 **Solution**:
@@ -56,21 +71,31 @@ This update resolves two critical issues with Excel file export:
 - Only the designated print area is included when printing
 - Signatures are placed only within the print area
 
-### Test Case 3: Complex File
+### Test Case 3: Complex File (Most Important!)
 
 1. Create an Excel file with:
-   - Multiple merged cell ranges
+   - Multiple merged cell ranges in various locations
    - Print area set to specific range (e.g., A1:H50)
    - Names in various cells
    - Signature markers in various locations
 
 2. Process through the application
+3. Download and open the result file
 
 **Expected Result**:
-- All merged cells preserved
-- Print area preserved
-- Signatures correctly placed
-- No Excel errors when opening
+- ✅ **File opens without any errors or warnings**
+- ✅ All merged cells preserved exactly as in original
+- ✅ Print area preserved
+- ✅ Signatures correctly placed in valid cells
+- ✅ No need for Excel's "recovery mode"
+- ✅ Content formatting matches original
+
+### Test Case 4: Previously Failing Files
+
+If you have Excel files that previously failed with errors:
+1. Try processing them again with this fix
+2. They should now work correctly
+3. Check console logs for merge restoration messages
 
 ## Console Logging
 
@@ -79,22 +104,32 @@ The application now provides detailed logging. Open browser console (F12) to see
 - `[parseExcelFile]` - Information about merged cells and print area
 - `[인쇄영역파싱]` - Print area parsing details
 - `[autoMatch]` - Auto-matching information
-- `[병합셀]` - Merged cell information
-- `[최종확인]` - Final validation before saving
+- `[병합셀]` - Merged cell information from original file
+- `[병합셀 복원]` - **NEW** Merged cell restoration process
+- `[병합셀 복원 완료]` - **NEW** Summary of merge restoration (how many restored/kept/failed)
+- `[최종확인]` - Final validation before saving with success indicators
+
+Key messages to look for:
+- `✅ 병합된 셀이 성공적으로 보존되었습니다!` - Merged cells preserved successfully
+- `⚠️ 경고: 병합된 셀 수가 여전히 다릅니다!` - Warning if merge count differs
+- `✓ 병합 복원: A1:B2` - Individual merge cell restoration
 
 These logs help debug any issues.
 
 ## Known Limitations
 
-1. **ExcelJS Library**: The underlying ExcelJS library has some limitations with very complex Excel features
+1. **ExcelJS Library**: The underlying ExcelJS library has some limitations with very complex Excel features, but the workaround we implemented addresses the most common issue
 2. **Large Files**: Very large Excel files (>5MB) may cause memory issues
 3. **Complex Formulas**: Some complex formulas might not be preserved exactly
 
 ## Troubleshooting
 
-### Issue: Excel file won't open after processing
+### Issue: Excel file won't open after processing (SHOULD BE FIXED NOW!)
+This was the primary issue that has been addressed. If you still encounter this:
 **Check**:
-- Look at browser console for error messages
+- Look at browser console for `[병합셀 복원]` messages
+- Ensure you see `✅ 병합된 셀이 성공적으로 보존되었습니다!` message
+- If you see errors during merge restoration, note which cells failed
 - Ensure original file is valid XLSX format
 - Try with a simpler test file first
 

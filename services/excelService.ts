@@ -771,11 +771,69 @@ export const generateFinalExcel = async (
   console.log(`  스킵: ${skippedCount}개`);
   console.log(`  캐시됨: ${assignmentValues.length - processedCount - failureCount - skippedCount}개`);
 
-  // Step 3: 병합된 셀 및 인쇄영역 복원은 무조건 제거!
-  // ExcelJS가 병합/언머지를 할 때 XML을 손상시킵니다.
-  // 해결책: 원본 파일을 로드하면 이미 병합/인쇄영역이 있으므로,
-  // 조작하지 않으면 ExcelJS가 저장할 때 자동으로 유지합니다.
-  console.log(`[주의] 병합된 셀과 인쇄영역은 의도적으로 조작하지 않습니다 (원본 유지).`);
+  // Step 3: 병합된 셀 복원
+  // ExcelJS 버그 대응: 이미지를 추가한 후 병합된 셀 정보가 손실될 수 있음
+  // 해결책: 원본에서 읽은 병합된 셀을 명시적으로 다시 적용
+  console.log(`[병합셀 복원] 원본 병합된 셀을 다시 적용합니다...`);
+  
+  // 먼저 현재 병합 상태 확인
+  const currentMergedCells = worksheet.merged ? [...worksheet.merged] : [];
+  console.log(`[병합셀 복원] 현재 병합된 셀: ${currentMergedCells.length}개 (원본: ${originalMergedCells.length}개)`);
+  
+  // 병합 범위 정규화 함수 (대소문자 무시, 공백 제거, $ 기호 제거)
+  const normalizeMergeRange = (range: string): string => {
+    return range.toUpperCase().replace(/[\s$]/g, '');
+  };
+  
+  // 병합된 셀이 손실되었다면 다시 적용
+  if (originalMergedCells.length > 0) {
+    let reappliedCount = 0;
+    let errorCount = 0;
+    let alreadyMergedCount = 0;
+    
+    // 현재 병합된 셀을 정규화하여 Set으로 저장 (빠른 조회)
+    const normalizedCurrentMerges = new Set(currentMergedCells.map(normalizeMergeRange));
+    
+    // 실패한 병합 범위를 추적 (오류 보고용)
+    const failedMerges: string[] = [];
+    
+    for (const mergeRange of originalMergedCells) {
+      try {
+        const normalizedRange = normalizeMergeRange(mergeRange);
+        
+        // 이미 병합되어 있는지 확인
+        if (!normalizedCurrentMerges.has(normalizedRange)) {
+          // 병합되지 않았으면 다시 병합
+          worksheet.mergeCells(mergeRange);
+          reappliedCount++;
+          // 처음 몇 개만 상세 로그 출력 (성능 최적화)
+          if (reappliedCount <= 5) {
+            console.log(`  ✓ 병합 복원: ${mergeRange}`);
+          }
+        } else {
+          alreadyMergedCount++;
+        }
+      } catch (mergeErr) {
+        errorCount++;
+        failedMerges.push(mergeRange);
+        // 에러는 항상 출력 (중요)
+        console.warn(`  ✗ 병합 실패: ${mergeRange}`, mergeErr);
+      }
+    }
+    
+    // 복원 요약 출력
+    if (reappliedCount > 5) {
+      console.log(`  ... 그리고 ${reappliedCount - 5}개 더 복원됨`);
+    }
+    
+    console.log(`[병합셀 복원 완료] 복원: ${reappliedCount}개, 유지: ${alreadyMergedCount}개, 실패: ${errorCount}개`);
+    
+    if (failedMerges.length > 0) {
+      console.warn(`[병합셀 복원 실패 목록]`, failedMerges);
+    }
+  } else {
+    console.log(`[병합셀 복원] 원본에 병합된 셀이 없음 - 복원 불필요`);
+  }
   
   // 최종 확인: 병합된 셀과 인쇄영역이 여전히 존재하는지 확인
   const finalMergedCells = worksheet.merged ? [...worksheet.merged] : [];
@@ -783,14 +841,17 @@ export const generateFinalExcel = async (
   console.log(`[최종확인] 병합된 셀: ${finalMergedCells.length}개 (원본: ${originalMergedCells.length}개)`);
   console.log(`[최종확인] 인쇄영역: ${finalPrintArea || '설정 안 됨'} (원본: ${originalPrintArea || '설정 안 됨'})`);
   
-  // 병합된 셀 수나 인쇄영역이 변경된 경우 경고 (데이터 무결성 체크)
-  // 이는 ExcelJS의 내부 처리로 인한 것일 수 있으므로 경고만 표시
-  // 원본 파일을 직접 로드했으므로 대부분의 경우 자동으로 보존됨
+  // 병합된 셀 수나 인쇄영역이 변경된 경우 경고
   if (originalMergedCells.length !== finalMergedCells.length) {
-    console.warn(`⚠️ 경고: 병합된 셀 수가 변경되었습니다! 이는 ExcelJS의 내부 처리로 인한 것일 수 있습니다.`);
+    console.warn(`⚠️ 경고: 병합된 셀 수가 여전히 다릅니다! (원본: ${originalMergedCells.length}, 최종: ${finalMergedCells.length})`);
+  } else if (originalMergedCells.length > 0) {
+    console.log(`✅ 병합된 셀이 성공적으로 보존되었습니다!`);
   }
+  
   if (originalPrintArea !== finalPrintArea) {
-    console.warn(`⚠️ 경고: 인쇄영역이 변경되었습니다! 이는 ExcelJS의 내부 처리로 인한 것일 수 있습니다.`);
+    console.warn(`⚠️ 경고: 인쇄영역이 변경되었습니다! (원본: ${originalPrintArea || '없음'}, 최종: ${finalPrintArea || '없음'})`);
+  } else if (originalPrintArea) {
+    console.log(`✅ 인쇄영역이 성공적으로 보존되었습니다!`);
   }
   // Step 4: 워크북 저장
   try {
