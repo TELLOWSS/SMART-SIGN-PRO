@@ -789,9 +789,13 @@ export const generateFinalExcel = async (
   if (originalMergedCells.length > 0) {
     let reappliedCount = 0;
     let errorCount = 0;
+    let alreadyMergedCount = 0;
     
     // 현재 병합된 셀을 정규화하여 Set으로 저장 (빠른 조회)
     const normalizedCurrentMerges = new Set(currentMergedCells.map(normalizeMergeRange));
+    
+    // 실패한 병합 범위를 추적 (오류 보고용)
+    const failedMerges: string[] = [];
     
     for (const mergeRange of originalMergedCells) {
       try {
@@ -802,17 +806,31 @@ export const generateFinalExcel = async (
           // 병합되지 않았으면 다시 병합
           worksheet.mergeCells(mergeRange);
           reappliedCount++;
-          console.log(`  ✓ 병합 복원: ${mergeRange}`);
+          // 처음 몇 개만 상세 로그 출력 (성능 최적화)
+          if (reappliedCount <= 5) {
+            console.log(`  ✓ 병합 복원: ${mergeRange}`);
+          }
         } else {
-          console.log(`  ◊ 이미 병합됨: ${mergeRange}`);
+          alreadyMergedCount++;
         }
       } catch (mergeErr) {
         errorCount++;
+        failedMerges.push(mergeRange);
+        // 에러는 항상 출력 (중요)
         console.warn(`  ✗ 병합 실패: ${mergeRange}`, mergeErr);
       }
     }
     
-    console.log(`[병합셀 복원 완료] 복원: ${reappliedCount}개, 유지: ${currentMergedCells.length}개, 실패: ${errorCount}개`);
+    // 복원 요약 출력
+    if (reappliedCount > 5) {
+      console.log(`  ... 그리고 ${reappliedCount - 5}개 더 복원됨`);
+    }
+    
+    console.log(`[병합셀 복원 완료] 복원: ${reappliedCount}개, 유지: ${alreadyMergedCount}개, 실패: ${errorCount}개`);
+    
+    if (failedMerges.length > 0) {
+      console.warn(`[병합셀 복원 실패 목록]`, failedMerges);
+    }
   } else {
     console.log(`[병합셀 복원] 원본에 병합된 셀이 없음 - 복원 불필요`);
   }
