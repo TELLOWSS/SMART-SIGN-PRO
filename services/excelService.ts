@@ -200,7 +200,7 @@ export const parseExcelFile = async (buffer: ArrayBuffer): Promise<SheetData> =>
   }
 
   // Extract merged cells information
-  const mergedCells = worksheet.merged ? [...worksheet.merged] : [];
+  const mergedCells = worksheet.model.merges ? [...worksheet.model.merges] : [];
   console.log(`[parseExcelFile] Merged cells detected: ${mergedCells.length}`);
   
   // Extract print area information
@@ -467,7 +467,7 @@ export const generateFinalExcel = async (
   console.log(`[로드완료] 행: ${worksheet.actualRowCount}, 열: ${worksheet.actualColumnCount}, 워크시트 수: ${workbook.worksheets.length}`);
 
   // 병합된 셀 정보 읽기 (읽기만 - 조작 금지!)
-  const originalMergedCells = worksheet.merged ? [...worksheet.merged] : [];
+  const originalMergedCells = worksheet.model.merges ? [...worksheet.model.merges] : [];
   console.log(`[병합셀] 원본 병합된 셀: ${originalMergedCells.length}개 (읽기만, 조작 금지)`);
   for (const merge of originalMergedCells) {
     console.log(`  - ${merge}`);
@@ -777,7 +777,7 @@ export const generateFinalExcel = async (
   console.log(`[병합셀 복원] 원본 병합된 셀을 다시 적용합니다...`);
   
   // 먼저 현재 병합 상태 확인
-  const currentMergedCells = worksheet.merged ? [...worksheet.merged] : [];
+  const currentMergedCells = worksheet.model.merges ? [...worksheet.model.merges] : [];
   console.log(`[병합셀 복원] 현재 병합된 셀: ${currentMergedCells.length}개 (원본: ${originalMergedCells.length}개)`);
   
   // 병합 범위 정규화 함수 (대소문자 무시, 공백 제거, $ 기호 제거)
@@ -836,7 +836,7 @@ export const generateFinalExcel = async (
   }
   
   // 최종 확인: 병합된 셀과 인쇄영역이 여전히 존재하는지 확인
-  const finalMergedCells = worksheet.merged ? [...worksheet.merged] : [];
+  const finalMergedCells = worksheet.model.merges ? [...worksheet.model.merges] : [];
   const finalPrintArea = worksheet.pageSetup?.printArea;
   console.log(`[최종확인] 병합된 셀: ${finalMergedCells.length}개 (원본: ${originalMergedCells.length}개)`);
   console.log(`[최종확인] 인쇄영역: ${finalPrintArea || '설정 안 됨'} (원본: ${originalPrintArea || '설정 안 됨'})`);

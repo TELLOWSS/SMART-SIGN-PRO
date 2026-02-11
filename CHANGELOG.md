@@ -3,7 +3,14 @@
 ## [Unreleased] - 2026-02-11
 
 ### Fixed
-- **CRITICAL: Merged Cells Lost in Export** ⚠️ [NEW]
+- **TypeScript Compilation Errors** ⚠️ [NEW]
+  - Fixed incorrect property access for merged cells in ExcelJS
+  - Changed `worksheet.merged` to `worksheet.model.merges` (correct ExcelJS API)
+  - Fixed null safety issue in auto-matching flow
+  - Fixed blob verification code type errors
+  - All TypeScript errors resolved, project now compiles cleanly
+
+- **CRITICAL: Merged Cells Lost in Export** ⚠️
   - Fixed issue where merged cells were being lost when exporting files with signatures
   - Resolved ExcelJS library limitation by explicitly re-applying merged cells after adding images
   - Files now open without errors in Excel
