@@ -187,6 +187,11 @@ export default function App() {
 
     setProcessing(true);
     setTimeout(() => {
+        if (!state.sheetData) {
+          setError("시트 데이터가 없습니다.");
+          setProcessing(false);
+          return;
+        }
         const assignments = autoMatchSignatures(state.sheetData, state.signatures);
         setState(prev => ({ ...prev, assignments, step: 'preview' }));
         setProcessing(false);
@@ -250,8 +255,9 @@ export default function App() {
       }
 
       // ZIP 파일 검증
-      const view = new Uint8Array(blob.stream ? await blob.stream().getReader().read() : []);
-      const isZip = view && view.length > 1 && view[0] === 0x50 && view[1] === 0x4b;
+      const arrayBuffer = await blob.arrayBuffer();
+      const view = new Uint8Array(arrayBuffer);
+      const isZip = view.length > 1 && view[0] === 0x50 && view[1] === 0x4b;
       console.log(`ZIP 형식 검증: ${isZip ? '✓ 정상' : '✗ 비정상'}`);
 
       const url = URL.createObjectURL(blob);
