@@ -333,6 +333,14 @@ export const autoMatchSignatures = (
 };
 
 /**
+ * 인쇄영역 범위가 유효한지 검증
+ */
+const isValidPrintAreaRange = (tlRow: number, brRow: number, tlCol: number, brCol: number): boolean => {
+  return tlRow > 0 && brRow > 0 && tlCol > 0 && brCol > 0 && 
+         tlRow <= brRow && tlCol <= brCol;
+};
+
+/**
  * 컬럼 문자(A, B, AA, AB 등)를 숫자로 변환
  * @example "A" => 1, "Z" => 26, "AA" => 27
  */
@@ -508,8 +516,7 @@ export const generateFinalExcel = async (
           const brRow = parseInt(brMatch[2], 10);
           
           // 유효성 검사
-          if (tlRow > 0 && brRow > 0 && tlCol > 0 && brCol > 0 && 
-              tlRow <= brRow && tlCol <= brCol) {
+          if (isValidPrintAreaRange(tlRow, brRow, tlCol, brCol)) {
             printAreaRows = { start: tlRow, end: brRow };
             printAreaCols = { start: tlCol, end: brCol };
             console.log(`[인쇄영역파싱성공] 행: ${printAreaRows.start}-${printAreaRows.end}, 열: ${printAreaCols.start}-${printAreaCols.end}`);
@@ -534,10 +541,11 @@ export const generateFinalExcel = async (
       }
     } catch (parseErr) {
       console.error(`[인쇄영역파싱실패] 예외 발생:`, parseErr);
-      console.warn(`기본 인쇄영역 사용: 전체 시트`);
+      // 인쇄영역을 파싱할 수 없을 때는 전체 시트를 사용 (기본값 유지)
+      console.log(`[인쇄영역] 전체 시트 사용 (행: 1-${printAreaRows.end}, 열: 1-${printAreaCols.end})`);
     }
   } else {
-    console.log(`[인쇄영역] 설정되지 않음 - 전체 시트 사용`);
+    console.log(`[인쇄영역] 설정되지 않음 - 전체 시트 사용 (행: 1-${printAreaRows.end}, 열: 1-${printAreaCols.end})`);
   }
 
   // Step 2: 할당된 서명 처리
@@ -775,11 +783,14 @@ export const generateFinalExcel = async (
   console.log(`[최종확인] 병합된 셀: ${finalMergedCells.length}개 (원본: ${originalMergedCells.length}개)`);
   console.log(`[최종확인] 인쇄영역: ${finalPrintArea || '설정 안 됨'} (원본: ${originalPrintArea || '설정 안 됨'})`);
   
+  // 병합된 셀 수나 인쇄영역이 변경된 경우 경고 (데이터 무결성 체크)
+  // 이는 ExcelJS의 내부 처리로 인한 것일 수 있으므로 경고만 표시
+  // 원본 파일을 직접 로드했으므로 대부분의 경우 자동으로 보존됨
   if (originalMergedCells.length !== finalMergedCells.length) {
-    console.warn(`⚠️ 경고: 병합된 셀 수가 변경되었습니다!`);
+    console.warn(`⚠️ 경고: 병합된 셀 수가 변경되었습니다! 이는 ExcelJS의 내부 처리로 인한 것일 수 있습니다.`);
   }
   if (originalPrintArea !== finalPrintArea) {
-    console.warn(`⚠️ 경고: 인쇄영역이 변경되었습니다!`);
+    console.warn(`⚠️ 경고: 인쇄영역이 변경되었습니다! 이는 ExcelJS의 내부 처리로 인한 것일 수 있습니다.`);
   }
   // Step 4: 워크북 저장
   try {
