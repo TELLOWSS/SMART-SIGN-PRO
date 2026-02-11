@@ -780,15 +780,25 @@ export const generateFinalExcel = async (
   const currentMergedCells = worksheet.merged ? [...worksheet.merged] : [];
   console.log(`[병합셀 복원] 현재 병합된 셀: ${currentMergedCells.length}개 (원본: ${originalMergedCells.length}개)`);
   
+  // 병합 범위 정규화 함수 (대소문자 무시, 공백 제거, $ 기호 제거)
+  const normalizeMergeRange = (range: string): string => {
+    return range.toUpperCase().replace(/[\s$]/g, '');
+  };
+  
   // 병합된 셀이 손실되었다면 다시 적용
   if (originalMergedCells.length > 0) {
     let reappliedCount = 0;
     let errorCount = 0;
     
+    // 현재 병합된 셀을 정규화하여 Set으로 저장 (빠른 조회)
+    const normalizedCurrentMerges = new Set(currentMergedCells.map(normalizeMergeRange));
+    
     for (const mergeRange of originalMergedCells) {
       try {
+        const normalizedRange = normalizeMergeRange(mergeRange);
+        
         // 이미 병합되어 있는지 확인
-        if (!currentMergedCells.includes(mergeRange)) {
+        if (!normalizedCurrentMerges.has(normalizedRange)) {
           // 병합되지 않았으면 다시 병합
           worksheet.mergeCells(mergeRange);
           reappliedCount++;
