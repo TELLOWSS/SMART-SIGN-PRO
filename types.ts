@@ -21,6 +21,8 @@ export interface RowData {
 export interface SheetData {
   name: string;
   rows: RowData[];
+  mergedCells?: string[]; // Array of merged cell ranges like "A1:B2"
+  printArea?: string; // Print area range like "A1:Z100"
 }
 
 export interface SignatureAssignment {

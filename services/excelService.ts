@@ -199,15 +199,25 @@ export const parseExcelFile = async (buffer: ArrayBuffer): Promise<SheetData> =>
     throw new Error("파일에 데이터가 없습니다.");
   }
 
+  // Extract merged cells information
+  const mergedCells = worksheet.merged ? [...worksheet.merged] : [];
+  console.log(`[parseExcelFile] Merged cells detected: ${mergedCells.length}`);
+  
+  // Extract print area information
+  const printArea = worksheet.pageSetup?.printArea;
+  console.log(`[parseExcelFile] Print area: ${printArea || 'Not set'}`);
+
   return {
     name: worksheet.name || 'Sheet1',
     rows,
+    mergedCells,
+    printArea,
   };
 };
 
 /**
  * 서명 자동 매칭 로직
- * 개선사항: 더 나은 열 검색, 에러 처리, 결과 보고
+ * 개선사항: 더 나은 열 검색, 에러 처리, 결과 보고, 병합셀 인식
  */
 export const autoMatchSignatures = (
   sheetData: SheetData,
@@ -224,6 +234,9 @@ export const autoMatchSignatures = (
     console.warn("업로드된 서명이 없습니다.");
     return assignments;
   }
+  
+  const mergedCells = sheetData.mergedCells || [];
+  console.log(`[autoMatch] 병합된 셀: ${mergedCells.length}개`);
   
   let nameColIndex = -1;
   let headerRowIndex = -1;
@@ -279,6 +292,14 @@ export const autoMatchSignatures = (
         
         // Check for signature marker
         if (['1', '(1)', '1.', '1)', 'o', 'o)', '○'].includes(cellStr)) {
+          // Skip if cell is in a merged range but not the top-left cell
+          if (isCellInMergedRange(cell.row, cell.col, mergedCells)) {
+            if (!isTopLeftOfMergedCell(cell.row, cell.col, mergedCells)) {
+              console.log(`  [autoMatch] 스킵: (${cell.row},${cell.col}) 병합셀 내부`);
+              continue;
+            }
+          }
+          
           const key = `${cell.row}:${cell.col}`;
           
           const randomSigIndex = Math.floor(Math.random() * availableSigs.length);
@@ -312,6 +333,14 @@ export const autoMatchSignatures = (
 };
 
 /**
+ * 인쇄영역 범위가 유효한지 검증
+ */
+const isValidPrintAreaRange = (tlRow: number, brRow: number, tlCol: number, brCol: number): boolean => {
+  return tlRow > 0 && brRow > 0 && tlCol > 0 && brCol > 0 && 
+         tlRow <= brRow && tlCol <= brCol;
+};
+
+/**
  * 컬럼 문자(A, B, AA, AB 등)를 숫자로 변환
  * @example "A" => 1, "Z" => 26, "AA" => 27
  */
@@ -321,6 +350,83 @@ const columnLetterToNumber = (col: string): number => {
     result = result * 26 + (col.charCodeAt(i) - 64);
   }
   return result;
+};
+
+/**
+ * 숫자를 컬럼 문자로 변환
+ * @example 1 => "A", 26 => "Z", 27 => "AA"
+ */
+const columnNumberToLetter = (num: number): string => {
+  let result = '';
+  while (num > 0) {
+    const remainder = (num - 1) % 26;
+    result = String.fromCharCode(65 + remainder) + result;
+    num = Math.floor((num - 1) / 26);
+  }
+  return result;
+};
+
+/**
+ * 셀 주소를 행/열 번호로 파싱
+ * @example "A1" => { row: 1, col: 1 }
+ */
+const parseCellAddress = (address: string): { row: number; col: number } | null => {
+  const match = address.match(/^([A-Z]+)(\d+)$/i);
+  if (!match) return null;
+  return {
+    col: columnLetterToNumber(match[1].toUpperCase()),
+    row: parseInt(match[2], 10)
+  };
+};
+
+/**
+ * 셀이 병합된 셀 범위 내에 있는지 확인
+ * @param row 행 번호 (1-based)
+ * @param col 열 번호 (1-based)
+ * @param mergedCells 병합된 셀 범위 배열 (예: ["A1:B2", "C3:D4"])
+ * @returns 병합된 셀 내부에 있으면 true
+ */
+const isCellInMergedRange = (row: number, col: number, mergedCells: string[]): boolean => {
+  for (const range of mergedCells) {
+    try {
+      const [start, end] = range.split(':');
+      const startPos = parseCellAddress(start);
+      const endPos = parseCellAddress(end);
+      
+      if (startPos && endPos) {
+        if (row >= startPos.row && row <= endPos.row &&
+            col >= startPos.col && col <= endPos.col) {
+          return true;
+        }
+      }
+    } catch (e) {
+      console.warn(`Failed to parse merged cell range: ${range}`, e);
+    }
+  }
+  return false;
+};
+
+/**
+ * 병합된 셀의 왼쪽 상단 셀인지 확인
+ * @param row 행 번호 (1-based)
+ * @param col 열 번호 (1-based)
+ * @param mergedCells 병합된 셀 범위 배열
+ * @returns 왼쪽 상단 셀이면 true
+ */
+const isTopLeftOfMergedCell = (row: number, col: number, mergedCells: string[]): boolean => {
+  for (const range of mergedCells) {
+    try {
+      const [start] = range.split(':');
+      const startPos = parseCellAddress(start);
+      
+      if (startPos && startPos.row === row && startPos.col === col) {
+        return true;
+      }
+    } catch (e) {
+      console.warn(`Failed to parse merged cell range: ${range}`, e);
+    }
+  }
+  return false;
 };
 
 /**
@@ -382,23 +488,64 @@ export const generateFinalExcel = async (
   
   if (originalPrintArea) {
     try {
-      // printArea 형식: "A1:C10" 또는 "Sheet1!A1:C10"
-      const range = originalPrintArea.split('!').pop() || originalPrintArea;
-      const [topLeft, bottomRight] = range.split(':');
-      if (topLeft && bottomRight) {
-        const tlMatch = topLeft.match(/([A-Z]+)(\d+)/i);
-        const brMatch = bottomRight.match(/([A-Z]+)(\d+)/i);
+      // printArea 형식 처리:
+      // 1. "A1:C10" (단순 범위)
+      // 2. "Sheet1!A1:C10" (시트명 포함)
+      // 3. "$A$1:$C$10" (절대 참조)
+      // 4. "Sheet1!$A$1:$C$10" (시트명 + 절대 참조)
+      let range = originalPrintArea;
+      
+      // 시트명 제거
+      if (range.includes('!')) {
+        range = range.split('!').pop() || range;
+      }
+      
+      // $ 기호 제거 (절대 참조)
+      range = range.replace(/\$/g, '');
+      
+      const parts = range.split(':');
+      if (parts.length === 2) {
+        const [topLeft, bottomRight] = parts;
+        const tlMatch = topLeft.trim().match(/^([A-Z]+)(\d+)$/i);
+        const brMatch = bottomRight.trim().match(/^([A-Z]+)(\d+)$/i);
+        
         if (tlMatch && brMatch) {
           const tlCol = columnLetterToNumber(tlMatch[1].toUpperCase());
           const brCol = columnLetterToNumber(brMatch[1].toUpperCase());
-          printAreaRows = { start: parseInt(tlMatch[2]), end: parseInt(brMatch[2]) };
-          printAreaCols = { start: tlCol, end: brCol };
-          console.log(`[인쇄영역파싱] 행: ${printAreaRows.start}-${printAreaRows.end}, 열: ${printAreaCols.start}-${printAreaCols.end}`);
+          const tlRow = parseInt(tlMatch[2], 10);
+          const brRow = parseInt(brMatch[2], 10);
+          
+          // 유효성 검사
+          if (isValidPrintAreaRange(tlRow, brRow, tlCol, brCol)) {
+            printAreaRows = { start: tlRow, end: brRow };
+            printAreaCols = { start: tlCol, end: brCol };
+            console.log(`[인쇄영역파싱성공] 행: ${printAreaRows.start}-${printAreaRows.end}, 열: ${printAreaCols.start}-${printAreaCols.end}`);
+          } else {
+            console.warn(`[인쇄영역파싱실패] 잘못된 범위 값: ${originalPrintArea}`);
+          }
+        } else {
+          console.warn(`[인쇄영역파싱실패] 형식 오류: ${originalPrintArea}`);
         }
+      } else if (parts.length === 1 && parts[0].trim()) {
+        // 단일 셀인 경우 (예: "A1")
+        const cellMatch = parts[0].trim().match(/^([A-Z]+)(\d+)$/i);
+        if (cellMatch) {
+          const col = columnLetterToNumber(cellMatch[1].toUpperCase());
+          const row = parseInt(cellMatch[2], 10);
+          printAreaRows = { start: row, end: row };
+          printAreaCols = { start: col, end: col };
+          console.log(`[인쇄영역파싱성공] 단일 셀: (${row}, ${col})`);
+        }
+      } else {
+        console.warn(`[인쇄영역파싱실패] 예상치 못한 형식: ${originalPrintArea}`);
       }
     } catch (parseErr) {
-      console.warn(`[인쇄영역파싱실패]`, parseErr);
+      console.error(`[인쇄영역파싱실패] 예외 발생:`, parseErr);
+      // 인쇄영역을 파싱할 수 없을 때는 전체 시트를 사용 (기본값 유지)
+      console.log(`[인쇄영역] 전체 시트 사용 (행: 1-${printAreaRows.end}, 열: 1-${printAreaCols.end})`);
     }
+  } else {
+    console.log(`[인쇄영역] 설정되지 않음 - 전체 시트 사용 (행: 1-${printAreaRows.end}, 열: 1-${printAreaCols.end})`);
   }
 
   // Step 2: 할당된 서명 처리
@@ -419,6 +566,21 @@ export const generateFinalExcel = async (
            col >= printAreaCols.start && col <= printAreaCols.end;
   };
 
+  // 병합된 셀 범위 내인지 확인 (병합셀이 아니거나 왼쪽 상단 셀만 허용)
+  const canPlaceSignature = (row: number, col: number) => {
+    // 병합된 셀이면 왼쪽 상단 셀인 경우만 허용
+    if (isCellInMergedRange(row, col, originalMergedCells)) {
+      if (isTopLeftOfMergedCell(row, col, originalMergedCells)) {
+        console.log(`  ⓘ (${row},${col}) 병합셀의 왼쪽 상단 - 배치 허용`);
+        return true;
+      } else {
+        console.log(`  ⊘ (${row},${col}) 병합셀 내부 - 스킵`);
+        return false;
+      }
+    }
+    return true;
+  };
+
   // 이미지 추가 전에 선택된 셀만 먼저 텍스트 정리
   console.log(`[사전처리] placeholder 텍스트 제거 중...`);
   for (const [key, assignment] of assignments) {
@@ -430,6 +592,12 @@ export const generateFinalExcel = async (
       // 인쇄영역 범위 확인
       if (!isInPrintArea(row, col)) {
         console.log(`  ⊘ (${row},${col}) 인쇄영역 밖 - 스킵`);
+        skippedCount++;
+        continue;
+      }
+
+      // 병합된 셀 확인
+      if (!canPlaceSignature(row, col)) {
         skippedCount++;
         continue;
       }
@@ -466,6 +634,12 @@ export const generateFinalExcel = async (
       // 인쇄영역 범위 확인
       if (!isInPrintArea(assignment.row, assignment.col)) {
         console.log(`  ⊘ (${assignment.row},${assignment.col}) 인쇄영역 밖 - 스킵`);
+        skippedCount++;
+        continue;
+      }
+
+      // 병합된 셀 확인
+      if (!canPlaceSignature(assignment.row, assignment.col)) {
         skippedCount++;
         continue;
       }
@@ -603,6 +777,21 @@ export const generateFinalExcel = async (
   // 조작하지 않으면 ExcelJS가 저장할 때 자동으로 유지합니다.
   console.log(`[주의] 병합된 셀과 인쇄영역은 의도적으로 조작하지 않습니다 (원본 유지).`);
   
+  // 최종 확인: 병합된 셀과 인쇄영역이 여전히 존재하는지 확인
+  const finalMergedCells = worksheet.merged ? [...worksheet.merged] : [];
+  const finalPrintArea = worksheet.pageSetup?.printArea;
+  console.log(`[최종확인] 병합된 셀: ${finalMergedCells.length}개 (원본: ${originalMergedCells.length}개)`);
+  console.log(`[최종확인] 인쇄영역: ${finalPrintArea || '설정 안 됨'} (원본: ${originalPrintArea || '설정 안 됨'})`);
+  
+  // 병합된 셀 수나 인쇄영역이 변경된 경우 경고 (데이터 무결성 체크)
+  // 이는 ExcelJS의 내부 처리로 인한 것일 수 있으므로 경고만 표시
+  // 원본 파일을 직접 로드했으므로 대부분의 경우 자동으로 보존됨
+  if (originalMergedCells.length !== finalMergedCells.length) {
+    console.warn(`⚠️ 경고: 병합된 셀 수가 변경되었습니다! 이는 ExcelJS의 내부 처리로 인한 것일 수 있습니다.`);
+  }
+  if (originalPrintArea !== finalPrintArea) {
+    console.warn(`⚠️ 경고: 인쇄영역이 변경되었습니다! 이는 ExcelJS의 내부 처리로 인한 것일 수 있습니다.`);
+  }
   // Step 4: 워크북 저장
   try {
     console.log(`[저장중] 워크북을 버퍼로 쓰고 있습니다...`);
