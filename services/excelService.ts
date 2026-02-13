@@ -832,7 +832,10 @@ export const generateFinalExcel = async (
       // 인쇄영역 이후의 행들을 순회하며 내용 제거
       for (let r = printAreaRows.end + 1; r <= currentRowCount; r++) {
         const row = worksheet.getRow(r);
-        if (row && row.values && (row.values as any[]).some(v => v !== undefined && v !== null)) {
+        // ExcelJS row.values can be array-like or sparse array
+        const hasContent = row && row.values && Array.isArray(row.values) && 
+                          row.values.some(v => v !== undefined && v !== null);
+        if (hasContent) {
           // 행의 모든 셀 값 제거
           row.eachCell({ includeEmpty: true }, (cell) => {
             cell.value = null;

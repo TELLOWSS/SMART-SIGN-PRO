@@ -240,8 +240,11 @@ export default function App() {
       console.log(`서명 배치 수: ${assignmentsToUse.size}`);
       console.log(`업로드된 서명: ${state.signatures.size}명`);
       
-      // Extract HH:MM:SS from ISO timestamp and format as HHMMSS (e.g., "143025")
-      const timestamp = new Date().toISOString().slice(11,19).replace(/:/g,'');
+      // Extract HH:MM:SS from ISO timestamp (format: "2024-01-01T14:30:25.123Z")
+      // slice(11, 19) extracts the time portion, then replace colons for filename safety
+      const ISO_TIME_START = 11; // Position of hours in ISO string
+      const ISO_TIME_END = 19;   // Position after seconds in ISO string
+      const timestamp = new Date().toISOString().slice(ISO_TIME_START, ISO_TIME_END).replace(/:/g,'');
       const baseFilename = state.excelFile?.name.replace(/\.xlsx$/i, '') || 'output';
       
       if (exportFormat === 'pdf') {

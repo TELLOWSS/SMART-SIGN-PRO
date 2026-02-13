@@ -110,8 +110,8 @@ const renderSheetToCanvas = async (
             const match = merge.match(/([A-Z]+)(\d+):([A-Z]+)(\d+)/i);
             if (match) {
               const startRow = parseInt(match[2]);
-              const startCol = match[1];
-              return startRow === r;
+              const startCol = columnLetterToNumber(match[1]);
+              return startRow === r && startCol === c;
             }
             return false;
           });
@@ -135,7 +135,7 @@ const renderSheetToCanvas = async (
       if (cellValue !== null && cellValue !== undefined) {
         if (typeof cellValue === 'object') {
           if ('result' in cellValue) {
-            displayValue = cellValue.result?.toString() || '';
+            displayValue = cellValue.result?.toString() ?? '';
           } else if ('text' in cellValue) {
             displayValue = (cellValue as any).text.toString();
           } else {
@@ -240,8 +240,12 @@ export const exportToPDF = async (
   
   const canvas = await renderSheetToCanvas(originalBuffer, assignments, signaturesMap, true);
   
+  // PDF 페이지 크기 상수
+  const A4_WIDTH_MM = 210;
+  const A4_HEIGHT_MM = 297;
+  
   // Canvas 크기에 맞는 PDF 생성
-  const imgWidth = 210; // A4 width in mm
+  const imgWidth = A4_WIDTH_MM;
   const imgHeight = (canvas.height * imgWidth) / canvas.width;
   
   const pdf = new jsPDF({
@@ -253,19 +257,19 @@ export const exportToPDF = async (
   const imgData = canvas.toDataURL('image/png');
   
   // 이미지를 PDF에 추가 (여러 페이지가 필요한 경우 처리)
-  if (imgHeight > 297) { // A4 height
+  if (imgHeight > A4_HEIGHT_MM) {
     // 큰 이미지는 여러 페이지로 나누기
     let heightLeft = imgHeight;
     let position = 0;
     
     pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
-    heightLeft -= 297;
+    heightLeft -= A4_HEIGHT_MM;
     
     while (heightLeft > 0) {
       position = heightLeft - imgHeight;
       pdf.addPage();
       pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
-      heightLeft -= 297;
+      heightLeft -= A4_HEIGHT_MM;
     }
   } else {
     pdf.addImage(imgData, 'PNG', 0, 0, imgWidth, imgHeight);
