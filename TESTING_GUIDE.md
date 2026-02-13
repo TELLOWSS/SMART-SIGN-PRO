@@ -2,7 +2,7 @@
 
 ## What Was Fixed
 
-This update resolves three critical issues with Excel file export:
+This update resolves critical issues with Excel file export and adds alternative export formats:
 
 ### 1. Merged Cells Lost in Export ✅ [CRITICAL FIX]
 **Problem**: When exporting files with signatures, merged cells were being lost, causing:
@@ -34,6 +34,30 @@ This update resolves three critical issues with Excel file export:
 - Enhanced print area parser supports all Excel formats
 - Print area settings are now preserved in the output file
 - Better handling when print area is not set
+
+### 4. Print Area Export Issues ✅ [NEW FIX]
+**Problem**: Exported Excel files had broken formatting and extra rows beyond the print area, causing:
+- Files to become very large
+- Formatting to break when opened
+- Extra empty rows extending far beyond intended content
+- 작성완료한 엑셀파일을 열었을때 에러가 뜨며 최대복구를 하여 열어보았으나 기존 양식의 틀이 다 깨지고, 행수도 많이 늘어나있음
+
+**Solution**:
+- Added logic to clear all rows and columns outside the print area before saving
+- Prevents worksheet expansion beyond print area boundaries
+- Reduces file size significantly
+- Maintains proper formatting structure
+
+### 5. Alternative Export Formats 🎉 [NEW FEATURE]
+**Problem**: Users needed alternative export formats in case Excel export was problematic.
+- 엑셀파일로 내보내기가 어렵다면 PDF파일이나 이미지파일로도 내보내기 해줬으면 좋겠어
+
+**Solution**:
+- Added PDF export using jsPDF and html2canvas
+- Added PNG image export using html2canvas
+- Format selector UI in the preview toolbar
+- All formats respect print area settings
+- Signatures are properly rendered in all formats
 
 ## How to Test
 
@@ -147,9 +171,15 @@ This was the primary issue that has been addressed. If you still encounter this:
 
 ## Technical Details
 
-### Files Modified
+### Files Modified/Added
 - `types.ts` - Added merged cells and print area to data types
-- `services/excelService.ts` - Core improvements (200+ lines of changes)
+- `services/excelService.ts` - Core improvements (300+ lines of changes)
+  - Print area restriction logic
+  - Improved cell clearing
+- `services/excelUtils.ts` - **NEW** Shared utility functions
+- `services/alternativeExportService.ts` - **NEW** PDF and PNG export
+- `App.tsx` - Added export format selector UI
+- `package.json` - Added html2canvas and jspdf dependencies
 - `.gitignore` - Added to prevent committing dependencies
 - `CHANGELOG.md` - Documentation of changes
 
@@ -159,25 +189,79 @@ This was the primary issue that has been addressed. If you still encounter this:
 - `parseCellAddress` - Parse cell addresses
 - `isValidPrintAreaRange` - Validate print area ranges
 - `canPlaceSignature` - Validate signature placement
+- `columnLetterToNumber` - Convert Excel columns to numbers
+- `columnNumberToLetter` - Convert numbers to Excel columns
+- `isSignaturePlaceholder` - Check if value is a placeholder
+- `exportToPDF` - **NEW** Export sheet as PDF
+- `exportToPNG` - **NEW** Export sheet as PNG image
 
 ### Quality Assurance
 - ✅ Build successful
 - ✅ TypeScript compilation clean
-- ✅ Security scan passed (CodeQL)
-- ✅ Code review completed
+- ✅ Security scan passed (CodeQL - 0 alerts)
+- ✅ No vulnerabilities in dependencies
+- ✅ Code review completed (all feedback addressed)
+
+## New Test Cases for Alternative Exports
+
+### Test Case 5: PDF Export ✨
+
+1. Create an Excel file with print area set
+2. Upload to application and process
+3. Select "PDF" format in the toolbar
+4. Click download button
+5. Open the PDF file
+
+**Expected Result**:
+- PDF opens without errors
+- Shows only content within print area
+- Signatures are properly rendered
+- Layout matches Excel preview
+- File size is reasonable
+
+### Test Case 6: PNG Image Export ✨
+
+1. Upload and process an Excel file
+2. Select "PNG" format in the toolbar
+3. Click download button
+4. Open the PNG image
+
+**Expected Result**:
+- Image opens without errors
+- High quality rendering (2x scale)
+- Shows only content within print area
+- Signatures are visible and clear
+- Background is white
+
+### Test Case 7: Format Switching
+
+1. Upload and process an Excel file
+2. Try exporting in each format:
+   - Excel (.xlsx)
+   - PDF (.pdf)
+   - PNG (.png)
+3. Verify each download works
+
+**Expected Result**:
+- All three formats download successfully
+- Filenames include correct extension
+- Content is consistent across formats
+- Format selector shows correct selection
 
 ## Reporting Issues
 
 If you encounter problems:
 
-1. Check browser console logs
+1. Check browser console logs (F12 → Console tab)
 2. Try with a simpler test file
 3. Note the specific file characteristics (merged cells, print area, etc.)
-4. Provide console error messages if available
+4. For PDF/PNG exports, check if the issue occurs in Excel export too
+5. Provide console error messages if available
 
 ## Next Steps
 
 1. Test with your actual Excel files
-2. Report any issues found
-3. Verify all edge cases work correctly
-4. Consider additional improvements if needed
+2. Try all three export formats (Excel, PDF, PNG)
+3. Report any issues found
+4. Verify all edge cases work correctly
+5. Consider additional improvements if needed

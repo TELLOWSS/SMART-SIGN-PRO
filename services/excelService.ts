@@ -1,5 +1,6 @@
 import ExcelJS from 'exceljs';
 import { SheetData, RowData, CellData, SignatureFile, SignatureAssignment } from '../types';
+import { columnLetterToNumber, columnNumberToLetter, parseCellAddress, SIGNATURE_PLACEHOLDERS, isSignaturePlaceholder } from './excelUtils';
 
 /**
  * 매칭을 위해 이름 정규화
@@ -291,7 +292,7 @@ export const autoMatchSignatures = (
         const cellStr = cell.value.toString().replace(/[\s\u00A0\uFEFF]+/g, '');
         
         // Check for signature marker
-        if (['1', '(1)', '1.', '1)', 'o', 'o)', '○'].includes(cellStr)) {
+        if (isSignaturePlaceholder(cellStr)) {
           // Skip if cell is in a merged range but not the top-left cell
           if (isCellInMergedRange(cell.row, cell.col, mergedCells)) {
             if (!isTopLeftOfMergedCell(cell.row, cell.col, mergedCells)) {
@@ -338,45 +339,6 @@ export const autoMatchSignatures = (
 const isValidPrintAreaRange = (tlRow: number, brRow: number, tlCol: number, brCol: number): boolean => {
   return tlRow > 0 && brRow > 0 && tlCol > 0 && brCol > 0 && 
          tlRow <= brRow && tlCol <= brCol;
-};
-
-/**
- * 컬럼 문자(A, B, AA, AB 등)를 숫자로 변환
- * @example "A" => 1, "Z" => 26, "AA" => 27
- */
-const columnLetterToNumber = (col: string): number => {
-  let result = 0;
-  for (let i = 0; i < col.length; i++) {
-    result = result * 26 + (col.charCodeAt(i) - 64);
-  }
-  return result;
-};
-
-/**
- * 숫자를 컬럼 문자로 변환
- * @example 1 => "A", 26 => "Z", 27 => "AA"
- */
-const columnNumberToLetter = (num: number): string => {
-  let result = '';
-  while (num > 0) {
-    const remainder = (num - 1) % 26;
-    result = String.fromCharCode(65 + remainder) + result;
-    num = Math.floor((num - 1) / 26);
-  }
-  return result;
-};
-
-/**
- * 셀 주소를 행/열 번호로 파싱
- * @example "A1" => { row: 1, col: 1 }
- */
-const parseCellAddress = (address: string): { row: number; col: number } | null => {
-  const match = address.match(/^([A-Z]+)(\d+)$/i);
-  if (!match) return null;
-  return {
-    col: columnLetterToNumber(match[1].toUpperCase()),
-    row: parseInt(match[2], 10)
-  };
 };
 
 /**
@@ -606,7 +568,7 @@ export const generateFinalExcel = async (
       if (cell) {
         const cellVal = cell.value ? cell.value.toString().replace(/[\s\u00A0\uFEFF]+/g, '') : '';
         
-        if (['1', '(1)', '1.', '1)', 'o', 'o)', '○'].includes(cellVal)) {
+        if (isSignaturePlaceholder(cellVal)) {
           cell.value = null;
           console.log(`  ✓ (${row},${col}) 텍스트 제거`);
         }
@@ -853,6 +815,65 @@ export const generateFinalExcel = async (
   } else if (originalPrintArea) {
     console.log(`✅ 인쇄영역이 성공적으로 보존되었습니다!`);
   }
+  
+  // Step 3.5: 인쇄영역 외부의 행/열 제거 (엑셀 파일 크기 및 구조 최적화)
+  if (originalPrintArea) {
+    console.log(`[인쇄영역 제한] 인쇄영역 외부 데이터 정리 중...`);
+    console.log(`  인쇄영역 범위: 행 ${printAreaRows.start}-${printAreaRows.end}, 열 ${printAreaCols.start}-${printAreaCols.end}`);
+    
+    let clearedRows = 0;
+    let clearedCols = 0;
+    
+    // 인쇄영역 외부의 행 제거 (아래쪽)
+    const currentRowCount = worksheet.actualRowCount;
+    if (currentRowCount > printAreaRows.end) {
+      console.log(`  현재 행 수: ${currentRowCount}, 인쇄영역 끝: ${printAreaRows.end}`);
+      
+      // 인쇄영역 이후의 행들을 순회하며 내용 제거
+      for (let r = printAreaRows.end + 1; r <= currentRowCount; r++) {
+        const row = worksheet.getRow(r);
+        // ExcelJS row.values can be array-like or sparse array
+        const hasContent = row && row.values && Array.isArray(row.values) && 
+                          row.values.some(v => v !== undefined && v !== null);
+        if (hasContent) {
+          // 행의 모든 셀 값 제거
+          row.eachCell({ includeEmpty: true }, (cell) => {
+            cell.value = null;
+            cell.style = {};
+          });
+          clearedRows++;
+        }
+      }
+      
+      console.log(`  ✓ ${clearedRows}개 행 정리됨 (${printAreaRows.end + 1}행 이후)`);
+    }
+    
+    // 인쇄영역 외부의 열 제거 (오른쪽)
+    const currentColCount = worksheet.actualColumnCount;
+    if (currentColCount > printAreaCols.end) {
+      console.log(`  현재 열 수: ${currentColCount}, 인쇄영역 끝: ${printAreaCols.end}`);
+      
+      // 각 행에서 인쇄영역 이후의 열들을 순회하며 내용 제거
+      for (let r = 1; r <= printAreaRows.end; r++) {
+        const row = worksheet.getRow(r);
+        for (let c = printAreaCols.end + 1; c <= currentColCount; c++) {
+          const cell = row.getCell(c);
+          if (cell && cell.value !== null && cell.value !== undefined) {
+            cell.value = null;
+            cell.style = {};
+            clearedCols++;
+          }
+        }
+      }
+      
+      console.log(`  ✓ ${clearedCols}개 셀 정리됨 (열 ${printAreaCols.end + 1} 이후)`);
+    }
+    
+    console.log(`[인쇄영역 제한 완료] 행: ${clearedRows}개, 셀: ${clearedCols}개 정리됨`);
+  } else {
+    console.log(`[인쇄영역 제한] 인쇄영역이 설정되지 않아 전체 시트 유지`);
+  }
+  
   // Step 4: 워크북 저장
   try {
     console.log(`[저장중] 워크북을 버퍼로 쓰고 있습니다...`);
