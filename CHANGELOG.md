@@ -1,5 +1,62 @@
 # Changelog
 
+## [Unreleased] - 2026-02-13
+
+### Fixed
+- **Print Area Export Issues** ⚠️ [NEW]
+  - Fixed issue where exported Excel files had broken formatting and extra rows
+  - Added logic to clear rows and columns outside the print area before saving
+  - Prevents worksheet expansion beyond print area bounds
+  - Reduces file size and prevents format corruption
+  - Issue: 작성완료한 엑셀파일을 열었을때 에러가 뜨며 최대복구를 하여 열어보았으나 기존 양식의 틀이 다 깨지고, 행수도 많이 늘어나있음
+
+### Added
+- **Alternative Export Formats** 🎉 [NEW]
+  - Added PDF export functionality using jsPDF and html2canvas
+  - Added PNG image export functionality using html2canvas
+  - Export format selector in UI (Excel/PDF/PNG)
+  - All export formats respect print area settings
+  - Issue: 엑셀파일로 내보내기가 어렵다면 PDF파일이나 이미지파일로도 내보내기 해줬으면 좋겠어
+
+- **New Utility Module** (`services/excelUtils.ts`):
+  - Shared utility functions for Excel operations
+  - `columnLetterToNumber`: Convert Excel column letters to numbers
+  - `columnNumberToLetter`: Convert numbers to Excel column letters
+  - `parseCellAddress`: Parse cell addresses like "A1" into coordinates
+  - `SIGNATURE_PLACEHOLDERS`: Constant array of signature placeholder values
+  - `isSignaturePlaceholder`: Helper to check if value is a placeholder
+
+- **New Export Service** (`services/alternativeExportService.ts`):
+  - `exportToPDF`: Generate PDF documents from Excel sheets
+  - `exportToPNG`: Generate PNG images from Excel sheets
+  - Renders Excel sheets as HTML tables for conversion
+  - Supports signature placement and formatting
+
+### Changed
+- **UI Improvements**:
+  - Added export format selection buttons in preview toolbar
+  - Visual indicators for selected export format
+  - Format-specific file naming (with .xlsx, .pdf, or .png extension)
+  - Enhanced user feedback for different export types
+
+### Security
+- **Dependency Updates**:
+  - Updated `jspdf` from v2.5.2 to v4.1.0 (fixes 5 CVEs):
+    - CVE: PDF Injection in AcroFormChoiceField
+    - CVE: DoS via Unvalidated BMP Dimensions
+    - CVE: Denial of Service (DoS)
+    - CVE: ReDoS Bypass
+    - CVE: Local File Inclusion/Path Traversal
+  - Added `html2canvas` v1.4.1 (no known vulnerabilities)
+  - CodeQL security scan: 0 alerts
+
+### Technical Details
+- Removed code duplication by extracting shared utilities
+- Improved type safety with explicit null handling
+- Enhanced error handling in async operations
+- Added comprehensive documentation and constants
+- All builds successful with TypeScript compilation clean
+
 ## [Unreleased] - 2026-02-11
 
 ### Fixed
