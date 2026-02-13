@@ -2,6 +2,7 @@ import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 import ExcelJS from 'exceljs';
 import { SignatureAssignment, SignatureFile } from '../types';
+import { columnLetterToNumber, isSignaturePlaceholder } from './excelUtils';
 
 /**
  * 엑셀 시트를 HTML 테이블로 렌더링하여 이미지로 변환하는 헬퍼 함수
@@ -42,14 +43,6 @@ const renderSheetToCanvas = async (
         const brMatch = bottomRight.trim().match(/^([A-Z]+)(\d+)$/i);
         
         if (tlMatch && brMatch) {
-          const columnLetterToNumber = (letter: string): number => {
-            let col = 0;
-            for (let i = 0; i < letter.length; i++) {
-              col = col * 26 + (letter.charCodeAt(i) - 64);
-            }
-            return col;
-          };
-          
           const tlCol = columnLetterToNumber(tlMatch[1].toUpperCase());
           const brCol = columnLetterToNumber(brMatch[1].toUpperCase());
           const tlRow = parseInt(tlMatch[2], 10);
@@ -170,7 +163,7 @@ const renderSheetToCanvas = async (
           img.style.transform = `rotate(${assignment.rotation}deg) scale(${assignment.scale})`;
           td.appendChild(img);
         }
-      } else if (displayValue && !['1', '(1)', '1.', '1)', 'o', 'o)', '○'].includes(displayValue.trim())) {
+      } else if (displayValue && !isSignaturePlaceholder(displayValue)) {
         // 일반 텍스트 표시 (placeholder가 아닌 경우)
         td.textContent = displayValue;
       }
@@ -211,23 +204,27 @@ export const exportToPNG = async (
   
   const canvas = await renderSheetToCanvas(originalBuffer, assignments, signaturesMap, true);
   
-  // Canvas를 Blob으로 변환
-  canvas.toBlob((blob) => {
-    if (!blob) {
-      throw new Error('이미지 생성 실패');
-    }
+  // Canvas를 Blob으로 변환 (Promise로 감싸서 에러 처리)
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error('이미지 생성 실패'));
+        return;
+      }
 
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
 
-    console.log(`[PNG 내보내기] 완료: ${filename}`);
-  }, 'image/png');
+      console.log(`[PNG 내보내기] 완료: ${filename}`);
+      resolve();
+    }, 'image/png');
+  });
 };
 
 /**

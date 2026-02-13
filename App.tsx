@@ -240,6 +240,7 @@ export default function App() {
       console.log(`서명 배치 수: ${assignmentsToUse.size}`);
       console.log(`업로드된 서명: ${state.signatures.size}명`);
       
+      // Extract HH:MM:SS from ISO timestamp and format as HHMMSS (e.g., "143025")
       const timestamp = new Date().toISOString().slice(11,19).replace(/:/g,'');
       const baseFilename = state.excelFile?.name.replace(/\.xlsx$/i, '') || 'output';
       

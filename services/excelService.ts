@@ -1,5 +1,6 @@
 import ExcelJS from 'exceljs';
 import { SheetData, RowData, CellData, SignatureFile, SignatureAssignment } from '../types';
+import { columnLetterToNumber, columnNumberToLetter, parseCellAddress, SIGNATURE_PLACEHOLDERS, isSignaturePlaceholder } from './excelUtils';
 
 /**
  * 매칭을 위해 이름 정규화
@@ -291,7 +292,7 @@ export const autoMatchSignatures = (
         const cellStr = cell.value.toString().replace(/[\s\u00A0\uFEFF]+/g, '');
         
         // Check for signature marker
-        if (['1', '(1)', '1.', '1)', 'o', 'o)', '○'].includes(cellStr)) {
+        if (isSignaturePlaceholder(cellStr)) {
           // Skip if cell is in a merged range but not the top-left cell
           if (isCellInMergedRange(cell.row, cell.col, mergedCells)) {
             if (!isTopLeftOfMergedCell(cell.row, cell.col, mergedCells)) {
@@ -338,45 +339,6 @@ export const autoMatchSignatures = (
 const isValidPrintAreaRange = (tlRow: number, brRow: number, tlCol: number, brCol: number): boolean => {
   return tlRow > 0 && brRow > 0 && tlCol > 0 && brCol > 0 && 
          tlRow <= brRow && tlCol <= brCol;
-};
-
-/**
- * 컬럼 문자(A, B, AA, AB 등)를 숫자로 변환
- * @example "A" => 1, "Z" => 26, "AA" => 27
- */
-const columnLetterToNumber = (col: string): number => {
-  let result = 0;
-  for (let i = 0; i < col.length; i++) {
-    result = result * 26 + (col.charCodeAt(i) - 64);
-  }
-  return result;
-};
-
-/**
- * 숫자를 컬럼 문자로 변환
- * @example 1 => "A", 26 => "Z", 27 => "AA"
- */
-const columnNumberToLetter = (num: number): string => {
-  let result = '';
-  while (num > 0) {
-    const remainder = (num - 1) % 26;
-    result = String.fromCharCode(65 + remainder) + result;
-    num = Math.floor((num - 1) / 26);
-  }
-  return result;
-};
-
-/**
- * 셀 주소를 행/열 번호로 파싱
- * @example "A1" => { row: 1, col: 1 }
- */
-const parseCellAddress = (address: string): { row: number; col: number } | null => {
-  const match = address.match(/^([A-Z]+)(\d+)$/i);
-  if (!match) return null;
-  return {
-    col: columnLetterToNumber(match[1].toUpperCase()),
-    row: parseInt(match[2], 10)
-  };
 };
 
 /**
@@ -606,7 +568,7 @@ export const generateFinalExcel = async (
       if (cell) {
         const cellVal = cell.value ? cell.value.toString().replace(/[\s\u00A0\uFEFF]+/g, '') : '';
         
-        if (['1', '(1)', '1.', '1)', 'o', 'o)', '○'].includes(cellVal)) {
+        if (isSignaturePlaceholder(cellVal)) {
           cell.value = null;
           console.log(`  ✓ (${row},${col}) 텍스트 제거`);
         }
