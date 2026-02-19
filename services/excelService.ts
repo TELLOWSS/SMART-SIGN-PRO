@@ -1,6 +1,6 @@
 import ExcelJS from 'exceljs';
 import { SheetData, RowData, CellData, SignatureFile, SignatureAssignment } from '../types';
-import { columnLetterToNumber, columnNumberToLetter, parseCellAddress, SIGNATURE_PLACEHOLDERS, isSignaturePlaceholder } from './excelUtils';
+import { columnLetterToNumber, columnNumberToLetter, parseCellAddress, SIGNATURE_PLACEHOLDERS, isSignaturePlaceholder, randomInt } from './excelUtils';
 
 /**
  * 매칭을 위해 이름 정규화
@@ -286,6 +286,10 @@ export const autoMatchSignatures = (
     const availableSigs = signatures.get(cleanName);
     
     if (availableSigs && availableSigs.length > 0) {
+      // Track used signature variants in this row to prevent immediate reuse
+      // This creates more natural variation when multiple placeholders exist
+      const usedVariantsInRow = new Set<string>();
+      
       for (const cell of row.cells) {
         if (cell.col === nameColIndex) continue;
         if (!cell.value) continue;
@@ -303,14 +307,36 @@ export const autoMatchSignatures = (
           
           const key = `${cell.row}:${cell.col}`;
           
-          const randomSigIndex = Math.floor(Math.random() * availableSigs.length);
-          const selectedSig = availableSigs[randomSigIndex];
+          // Select a signature variant, preferring unused ones in this row
+          let selectedSig;
+          const unusedSigs = availableSigs.filter(sig => !usedVariantsInRow.has(sig.variant));
           
-          // Random offset calculations for X/Y
-          const rotation = Math.floor(Math.random() * 11) - 5;  // -5 to 5 degrees
-          const scale = 0.95 + (Math.random() * 0.15); // 0.95 to 1.1
-          const offsetX = Math.floor(Math.random() * 9) - 4; // -4 to +4 px
-          const offsetY = Math.floor(Math.random() * 5) - 2;  // -2 to +2 px
+          if (unusedSigs.length > 0) {
+            // Use an unused variant if available
+            const randomSigIndex = Math.floor(Math.random() * unusedSigs.length);
+            selectedSig = unusedSigs[randomSigIndex];
+          } else {
+            // All variants used in this row, reset and pick any
+            usedVariantsInRow.clear();
+            const randomSigIndex = Math.floor(Math.random() * availableSigs.length);
+            selectedSig = availableSigs[randomSigIndex];
+          }
+          
+          // Safety check: ensure we have a valid signature
+          if (!selectedSig || !selectedSig.variant) {
+            console.warn(`  [autoMatch] 경고: (${cell.row},${cell.col}) 유효하지 않은 서명 - 스킵`);
+            continue;
+          }
+          
+          // Mark this variant as used in this row
+          usedVariantsInRow.add(selectedSig.variant);
+          
+          // Random offset calculations for natural variation
+          // Using helper function for cleaner code and consistent ranges
+          const rotation = randomInt(-5, 5);    // -5 to 5 degrees
+          const scale = 0.95 + (Math.random() * 0.15); // 0.95 to 1.1 (continuous)
+          const offsetX = randomInt(-4, 4);     // -4 to +4 px
+          const offsetY = randomInt(-2, 2);     // -2 to +2 px
 
           assignments.set(key, {
             row: cell.row,
