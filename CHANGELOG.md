@@ -1,5 +1,28 @@
 # Changelog
 
+## [Unreleased] - 2026-02-19
+
+### Fixed
+- **Random Signature Selection Improvements** 🎯 [NEW]
+  - Fixed issue where the same signature variant could be used multiple times in the same row
+  - Improved natural variation by preferring unused variants within each row
+  - Added safety checks for edge cases with invalid signature variants
+  - Enhanced code readability with new `randomInt` helper function
+  - Issue: 엑셀파일 내보내기를 할때에나 원본양식 그대로에 사인을 무작위 랜덤으로 넣는것에 대한 오류사항이 있는지 검증 및 분석하여 개선
+
+### Added
+- **New Utility Function** (`services/excelUtils.ts`):
+  - `randomInt(min, max)`: Generate random integers in a cleaner, more readable way
+  - Replaces complex `Math.floor(Math.random() * range) + offset` patterns
+  - Makes random value generation more maintainable
+
+### Changed
+- **Signature Matching Algorithm** (`autoMatchSignatures`):
+  - Now tracks used signature variants per row to avoid immediate reuse
+  - When multiple placeholders exist in a row, different variants are preferred
+  - Automatically cycles through variants when more placeholders than variants exist
+  - Better logging for debugging signature selection process
+
 ## [Unreleased] - 2026-02-13
 
 ### Fixed

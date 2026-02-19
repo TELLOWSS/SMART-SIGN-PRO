@@ -322,6 +322,12 @@ export const autoMatchSignatures = (
             selectedSig = availableSigs[randomSigIndex];
           }
           
+          // Safety check: ensure we have a valid signature
+          if (!selectedSig || !selectedSig.variant) {
+            console.warn(`  [autoMatch] 경고: (${cell.row},${cell.col}) 유효하지 않은 서명 - 스킵`);
+            continue;
+          }
+          
           // Mark this variant as used in this row
           usedVariantsInRow.add(selectedSig.variant);
           
