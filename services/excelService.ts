@@ -673,8 +673,8 @@ export const generateFinalExcel = async (
             continue;
           }
 
-          const MAX_BOX_WIDTH = 140 * assignment.scale;
-          const MAX_BOX_HEIGHT = 65 * assignment.scale;
+          const MAX_BOX_WIDTH = 80 * assignment.scale;
+          const MAX_BOX_HEIGHT = 40 * assignment.scale;
 
           const imgRatio = sigFile.width / sigFile.height;
           let finalWidth = MAX_BOX_WIDTH;
