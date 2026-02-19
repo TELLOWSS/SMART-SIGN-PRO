@@ -46,3 +46,13 @@ export const SIGNATURE_PLACEHOLDERS = ['1', '(1)', '1.', '1)', 'o', 'o)', '○']
 export const isSignaturePlaceholder = (value: string): boolean => {
   return SIGNATURE_PLACEHOLDERS.includes(value.trim());
 };
+
+/**
+ * 랜덤 정수 생성 헬퍼 함수 (min과 max 포함)
+ * @param min 최소값 (포함)
+ * @param max 최대값 (포함)
+ * @returns min과 max 사이의 랜덤 정수
+ */
+export const randomInt = (min: number, max: number): number => {
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+};
