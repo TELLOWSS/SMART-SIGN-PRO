@@ -569,40 +569,7 @@ export const generateFinalExcel = async (
     return true;
   };
 
-  // 이미지 추가 전에 선택된 셀만 먼저 텍스트 정리
-  console.log(`[사전처리] placeholder 텍스트 제거 중...`);
-  for (const [key, assignment] of assignments) {
-    try {
-      const [rowStr, colStr] = key.split(':');
-      const row = parseInt(rowStr, 10);
-      const col = parseInt(colStr, 10);
-
-      // 인쇄영역 범위 확인
-      if (!isInPrintArea(row, col)) {
-        console.log(`  ⊘ (${row},${col}) 인쇄영역 밖 - 스킵`);
-        skippedCount++;
-        continue;
-      }
-
-      // 병합된 셀 확인
-      if (!canPlaceSignature(row, col)) {
-        skippedCount++;
-        continue;
-      }
-
-      const cell = worksheet.getCell(row, col);
-      if (cell) {
-        const cellVal = cell.value ? cell.value.toString().replace(/[\s\u00A0\uFEFF]+/g, '') : '';
-        
-        if (isSignaturePlaceholder(cellVal)) {
-          cell.value = null;
-          console.log(`  ✓ (${row},${col}) 텍스트 제거`);
-        }
-      }
-    } catch (e) {
-      console.warn(`  ✗ (${key}) 텍스트 제거 오류:`, e);
-    }
-  }
+  // placeholder 텍스트는 유지하고 그 위에 서명 이미지를 오버레이
 
   const assignmentValues = Array.from(assignments.values());
   const CHUNK_SIZE = 15;  // 더 작은 청크로 나누기

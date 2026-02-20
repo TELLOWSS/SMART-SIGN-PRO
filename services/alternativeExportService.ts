@@ -153,14 +153,25 @@ const renderSheetToCanvas = async (
       if (assignment) {
         const sigFile = findSigFile(assignment.signatureBaseName, assignment.signatureVariantId);
         if (sigFile) {
-          // 서명 이미지 추가
+          // placeholder 텍스트 유지 후 서명 이미지 오버레이
+          td.style.position = 'relative';
+          if (displayValue) {
+            const span = document.createElement('span');
+            span.textContent = displayValue;
+            span.style.position = 'relative';
+            span.style.zIndex = '0';
+            td.appendChild(span);
+          }
           const img = document.createElement('img');
           img.src = sigFile.previewUrl;
           img.style.maxWidth = '120px';
           img.style.maxHeight = '60px';
           img.style.display = 'block';
-          img.style.margin = '0 auto';
-          img.style.transform = `rotate(${assignment.rotation}deg) scale(${assignment.scale})`;
+          img.style.position = 'absolute';
+          img.style.top = '0';
+          img.style.left = '50%';
+          img.style.zIndex = '1';
+          img.style.transform = `translateX(-50%) rotate(${assignment.rotation}deg) scale(${assignment.scale})`;
           td.appendChild(img);
         }
       } else if (displayValue && !isSignaturePlaceholder(displayValue)) {
