@@ -1096,8 +1096,23 @@ export const generateFinalExcel = async (
     let touchedRowCount = 0;
 
     // 실제 시트 사용 범위와 인쇄영역 끝점을 모두 고려해 순회 범위를 산정
-    const maxRow = Math.max(worksheet.actualRowCount || 1, printAreaRows.end);
+    // 유령 데이터 방어:
+    // - 일부 파일은 104만 행(Excel 최대 행 근처)에 찌꺼기 값이 남아 rowCount/actualRowCount가 비정상적으로 커진다.
+    // - 이 상태로 전 범위를 순회하면 브라우저가 멈출 수 있으므로,
+    //   인쇄영역 마지막 행 아래는 최대 N행까지만 Soft-clear를 수행한다.
+    const MAX_EXTRA_ROWS_TO_SCAN = 10000;
+    const worksheetRowCount = Math.max(worksheet.rowCount || 0, worksheet.actualRowCount || 0, 1);
+    const maxRow = Math.max(
+      printAreaRows.end,
+      Math.min(worksheetRowCount, printAreaRows.end + MAX_EXTRA_ROWS_TO_SCAN)
+    );
     const maxCol = Math.max(worksheet.actualColumnCount || 1, printAreaCols.end);
+
+    if (worksheetRowCount > maxRow) {
+      console.warn(
+        `[인쇄영역 제한] 유령 행 방어 활성화: rowCount=${worksheetRowCount}, 스캔상한=${maxRow} (인쇄영역 끝 + ${MAX_EXTRA_ROWS_TO_SCAN})`
+      );
+    }
 
     for (let r = 1; r <= maxRow; r++) {
       const row = worksheet.getRow(r);
@@ -1128,7 +1143,7 @@ export const generateFinalExcel = async (
       }
     }
 
-    console.log(`[인쇄영역 제한 완료] Soft-clear 셀: ${clearedCellCount}개, 영향 행: ${touchedRowCount}개`);
+    console.log(`[인쇄영역 제한 완료] Soft-clear 셀: ${clearedCellCount}개, 영향 행: ${touchedRowCount}개, 스캔행 상한: ${maxRow}`);
   } else {
     console.log(`[인쇄영역 제한] 인쇄영역이 설정되지 않아 전체 시트 유지`);
   }
@@ -1136,6 +1151,37 @@ export const generateFinalExcel = async (
   // Step 4: 워크북 저장
   try {
     console.log(`[저장중] 워크북을 버퍼로 쓰고 있습니다...`);
+
+    /**
+     * 조건부 서식 찌꺼기 방어:
+     * - ExcelJS 버전에 따라 빈 conditionalFormatting XML이 남아
+     *   Excel에서 복구 팝업을 유발할 수 있다.
+     * - 본 시나리오는 서명 삽입 후 조건부 서식 유지가 필수가 아니므로
+     *   저장 직전에 관련 메타를 안전하게 제거한다.
+     */
+    let cleanedConditionalFormattingSheets = 0;
+    for (const sheet of workbook.worksheets) {
+      const sheetAny = sheet as any;
+
+      try {
+        if (sheetAny.conditionalFormatting) {
+          sheetAny.conditionalFormatting = [];
+        }
+        if (sheetAny.conditionalFormattings) {
+          sheetAny.conditionalFormattings = [];
+        }
+
+        if (sheetAny.model) {
+          delete sheetAny.model.conditionalFormatting;
+          delete sheetAny.model.conditionalFormattings;
+        }
+
+        cleanedConditionalFormattingSheets++;
+      } catch (cfErr) {
+        console.warn('[조건부서식 방어] 정리 중 경고:', cfErr);
+      }
+    }
+    console.log(`[조건부서식 방어] conditionalFormatting 정리 완료 (${cleanedConditionalFormattingSheets}개 시트)`);
 
     /**
      * ExcelJS DPI 오버플로우(약 42억) 대응:
