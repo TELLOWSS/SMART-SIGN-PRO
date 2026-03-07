@@ -1082,60 +1082,53 @@ export const generateFinalExcel = async (
   const dedupedMergeDiag = getMergeDiagnostics((worksheet.model.merges || []) as string[]);
   console.log(`[병합셀진단] 저장직전 total=${dedupedMergeDiag.total}, unique=${dedupedMergeDiag.unique}, duplicates=${dedupedMergeDiag.duplicates}`);
   
-  // Step 3.5: 인쇄영역 외부의 행/열 제거 (엑셀 파일 크기 및 구조 최적화)
+  // Step 3.5: 인쇄영역 외부 Soft-clear
+  // 중요 방어 원칙:
+  // - spliceRows / spliceColumns 같은 구조 삭제 API는 절대 사용하지 않는다.
+  // - 행/열 구조를 삭제하면 Drawing(anchor) 관계가 깨져 서명 이미지가 증발하거나
+  //   Excel "파일 복구" 팝업이 발생할 수 있다.
+  // - 따라서 인쇄영역 밖 셀은 값/스타일만 초기화하는 Soft-clear로만 처리한다.
   if (originalPrintArea) {
-    console.log(`[인쇄영역 제한] 인쇄영역 외부 데이터 정리 중...`);
+    console.log(`[인쇄영역 제한] 인쇄영역 외부 Soft-clear 진행...`);
     console.log(`  인쇄영역 범위: 행 ${printAreaRows.start}-${printAreaRows.end}, 열 ${printAreaCols.start}-${printAreaCols.end}`);
     
-    let clearedRows = 0;
-    let clearedCols = 0;
-    
-    // 인쇄영역 외부의 행 제거 (아래쪽)
-    const currentRowCount = worksheet.actualRowCount;
-    if (currentRowCount > printAreaRows.end) {
-      console.log(`  현재 행 수: ${currentRowCount}, 인쇄영역 끝: ${printAreaRows.end}`);
-      
-      // 인쇄영역 이후의 행들을 순회하며 내용 제거
-      for (let r = printAreaRows.end + 1; r <= currentRowCount; r++) {
-        const row = worksheet.getRow(r);
-        // ExcelJS row.values can be array-like or sparse array
-        const hasContent = row && row.values && Array.isArray(row.values) && 
-                          row.values.some(v => v !== undefined && v !== null);
-        if (hasContent) {
-          // 행의 모든 셀 값 제거
-          row.eachCell({ includeEmpty: true }, (cell) => {
-            cell.value = null;
-            cell.style = {};
-          });
-          clearedRows++;
+    let clearedCellCount = 0;
+    let touchedRowCount = 0;
+
+    // 실제 시트 사용 범위와 인쇄영역 끝점을 모두 고려해 순회 범위를 산정
+    const maxRow = Math.max(worksheet.actualRowCount || 1, printAreaRows.end);
+    const maxCol = Math.max(worksheet.actualColumnCount || 1, printAreaCols.end);
+
+    for (let r = 1; r <= maxRow; r++) {
+      const row = worksheet.getRow(r);
+      let rowTouched = false;
+
+      for (let c = 1; c <= maxCol; c++) {
+        const isOutsidePrintArea =
+          r < printAreaRows.start || r > printAreaRows.end ||
+          c < printAreaCols.start || c > printAreaCols.end;
+
+        if (!isOutsidePrintArea) continue;
+
+        const cell = row.getCell(c);
+        const hasValue = cell.value !== null && cell.value !== undefined;
+        const hasStyle = !!cell.style && Object.keys(cell.style).length > 0;
+
+        if (hasValue || hasStyle) {
+          // Soft-clear: 구조는 유지하고 값/스타일만 비움
+          cell.value = null;
+          cell.style = {};
+          clearedCellCount++;
+          rowTouched = true;
         }
       }
-      
-      console.log(`  ✓ ${clearedRows}개 행 정리됨 (${printAreaRows.end + 1}행 이후)`);
-    }
-    
-    // 인쇄영역 외부의 열 제거 (오른쪽)
-    const currentColCount = worksheet.actualColumnCount;
-    if (currentColCount > printAreaCols.end) {
-      console.log(`  현재 열 수: ${currentColCount}, 인쇄영역 끝: ${printAreaCols.end}`);
-      
-      // 각 행에서 인쇄영역 이후의 열들을 순회하며 내용 제거
-      for (let r = 1; r <= printAreaRows.end; r++) {
-        const row = worksheet.getRow(r);
-        for (let c = printAreaCols.end + 1; c <= currentColCount; c++) {
-          const cell = row.getCell(c);
-          if (cell && cell.value !== null && cell.value !== undefined) {
-            cell.value = null;
-            cell.style = {};
-            clearedCols++;
-          }
-        }
+
+      if (rowTouched) {
+        touchedRowCount++;
       }
-      
-      console.log(`  ✓ ${clearedCols}개 셀 정리됨 (열 ${printAreaCols.end + 1} 이후)`);
     }
-    
-    console.log(`[인쇄영역 제한 완료] 행: ${clearedRows}개, 셀: ${clearedCols}개 정리됨`);
+
+    console.log(`[인쇄영역 제한 완료] Soft-clear 셀: ${clearedCellCount}개, 영향 행: ${touchedRowCount}개`);
   } else {
     console.log(`[인쇄영역 제한] 인쇄영역이 설정되지 않아 전체 시트 유지`);
   }
@@ -1143,6 +1136,22 @@ export const generateFinalExcel = async (
   // Step 4: 워크북 저장
   try {
     console.log(`[저장중] 워크북을 버퍼로 쓰고 있습니다...`);
+
+    /**
+     * ExcelJS DPI 오버플로우(약 42억) 대응:
+     * - 일부 환경에서 pageSetup.horizontalDpi / verticalDpi 값이 비정상적으로 기록되면
+     *   Excel이 파일 열기 시 "복구" 팝업을 띄울 수 있다.
+     * - 워크북 내 모든 시트에 대해 저장 직전 문제 필드를 제거하여 pageSetup XML 무결성을 방어한다.
+     */
+    let dpiSanitizedSheetCount = 0;
+    for (const sheet of workbook.worksheets) {
+      if (sheet.pageSetup) {
+        delete (sheet.pageSetup as any).horizontalDpi;
+        delete (sheet.pageSetup as any).verticalDpi;
+        dpiSanitizedSheetCount++;
+      }
+    }
+    console.log(`[DPI 방어] pageSetup.horizontalDpi / verticalDpi 제거 완료 (${dpiSanitizedSheetCount}개 시트)`);
     
     // ExcelJS 내부 상태 정리
     try {
