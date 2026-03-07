@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Upload, FileSpreadsheet, Image as ImageIcon, CheckCircle, RotateCcw, Download, Settings, RefreshCw, AlertCircle, HelpCircle, X, ArrowRight, FileText, MousePointer2, Copy, FileDown } from 'lucide-react';
 import { parseExcelFile, autoMatchSignatures, generateFinalExcel, normalizeName } from './services/excelService';
-import { exportToPDF, exportToPNG } from './services/alternativeExportService';
+import { buildSheetPreviewModel, exportToPDF, exportToPNG, SheetPreviewModel } from './services/alternativeExportService';
 import { AppState, SignatureFile, SheetData, SignatureAssignment } from './types';
 
 // Factory function to ensure fresh state on reset
@@ -17,6 +17,8 @@ const getInitialState = (): AppState => ({
 export default function App() {
   const [state, setState] = useState<AppState>(getInitialState());
   const [processing, setProcessing] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewModel, setPreviewModel] = useState<SheetPreviewModel | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showGuide, setShowGuide] = useState(false);
   const [toast, setToast] = useState<{msg: string, type: 'success' | 'info'} | null>(null);
@@ -44,6 +46,52 @@ export default function App() {
       cleanupBlobUrls(signaturesRef.current);
     };
   }, []);
+
+  /**
+   * 실시간 미리보기 모델 생성
+   * - '내보내기' 전에 실제 출력과 유사한 결과를 즉시 확인할 수 있도록
+   *   대체 내보내기 서비스의 HTML 변환 로직 기반 모델을 재사용한다.
+   */
+  useEffect(() => {
+    if (state.step !== 'preview' || !state.excelBuffer) {
+      return;
+    }
+
+    let canceled = false;
+
+    const loadPreview = async () => {
+      setPreviewLoading(true);
+
+      try {
+        const model = await buildSheetPreviewModel(
+          state.excelBuffer as ArrayBuffer,
+          state.assignments,
+          state.signatures,
+          true
+        );
+
+        if (!canceled) {
+          setPreviewModel(model);
+        }
+      } catch (previewErr) {
+        console.error('Preview build error:', previewErr);
+        if (!canceled) {
+          setError('미리보기 생성 중 오류가 발생했습니다. 파일을 다시 확인해주세요.');
+          setPreviewModel(null);
+        }
+      } finally {
+        if (!canceled) {
+          setPreviewLoading(false);
+        }
+      }
+    };
+
+    loadPreview();
+
+    return () => {
+      canceled = true;
+    };
+  }, [state.step, state.excelBuffer, state.assignments, state.signatures]);
 
   const getUserFacingExportError = (errorMessage: string, format: 'excel' | 'pdf' | 'png') => {
     if (/out of memory|allocation failed|array buffer allocation failed/i.test(errorMessage)) {
@@ -119,6 +167,7 @@ export default function App() {
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
+      let objectUrl: string | null = null;
       // Only images
       if (!file.type.startsWith('image/')) {
         failedFiles.push(`${file.name} (이미지 파일이 아님)`);
@@ -131,18 +180,41 @@ export default function App() {
         continue;
       }
 
-      const objectUrl = URL.createObjectURL(file);
-
       try {
-        const getImageDims = () => new Promise<{w: number, h: number}>((resolve) => {
-          const img = new Image();
-          img.onload = () => resolve({ w: img.width, h: img.height });
-          img.onerror = () => {
-            URL.revokeObjectURL(objectUrl);
-            resolve({ w: 100, h: 50 });
-          };
-          img.src = objectUrl;
-        });
+        /**
+         * 메모리 최적화:
+         * - 우선 createImageBitmap으로 크기를 읽어 브라우저 디코더 리소스를 즉시 해제한다.
+         * - fallback 경로에서는 임시 Object URL을 만들고 즉시 revoke 한다.
+         */
+        const getImageDims = async (): Promise<{ w: number; h: number }> => {
+          if ('createImageBitmap' in window) {
+            try {
+              const bitmap = await createImageBitmap(file);
+              const dims = { w: bitmap.width, h: bitmap.height };
+              bitmap.close();
+              return dims;
+            } catch {
+              // fallback으로 진행
+            }
+          }
+
+          return await new Promise<{ w: number; h: number }>((resolve) => {
+            const tempUrl = URL.createObjectURL(file);
+            const img = new Image();
+            img.onload = () => {
+              const dims = { w: img.width, h: img.height };
+              img.src = '';
+              URL.revokeObjectURL(tempUrl);
+              resolve(dims);
+            };
+            img.onerror = () => {
+              img.src = '';
+              URL.revokeObjectURL(tempUrl);
+              resolve({ w: 100, h: 50 });
+            };
+            img.src = tempUrl;
+          });
+        };
 
         const { w, h } = await getImageDims();
 
@@ -164,9 +236,11 @@ export default function App() {
         
         if (!baseName) {
           failedFiles.push(`${file.name} (이름 파싱 불가)`);
-          URL.revokeObjectURL(objectUrl);
           continue;
         }
+
+        // 실제 앱에서 표시/내보내기에 사용하는 URL만 유지
+        objectUrl = URL.createObjectURL(file);
         
         const sigFile: SignatureFile = {
           name: baseName,
@@ -182,12 +256,18 @@ export default function App() {
           newSignatures.set(sigFile.name, list);
           count++;
         } else {
-          URL.revokeObjectURL(objectUrl);
+          if (objectUrl) {
+            URL.revokeObjectURL(objectUrl);
+            objectUrl = null;
+          }
           failedFiles.push(`${file.name} (중복)`);
         }
       } catch (err) {
         console.error('Image upload error:', err);
-        URL.revokeObjectURL(objectUrl);
+        if (objectUrl) {
+          URL.revokeObjectURL(objectUrl);
+          objectUrl = null;
+        }
         failedFiles.push(`${file.name} (처리 실패)`);
       }
     }
@@ -387,6 +467,7 @@ export default function App() {
       cleanupBlobUrls(state.signatures);
       
       setState(getInitialState());
+      setPreviewModel(null);
       setError(null);
       setToast({ msg: '초기화되었습니다.', type: 'info' });
     }
@@ -540,68 +621,80 @@ export default function App() {
           </div>
         </div>
 
-        {/* Table View with optimizations for mobile */}
+        {/* 실시간 프리뷰: alternativeExportService 공용 모델 기반 */}
         <div className="flex-1 overflow-auto bg-gray-100 p-2 sm:p-8 custom-scrollbar relative">
           <div className="bg-white shadow-xl rounded-sm overflow-hidden inline-block min-w-full">
-            <table className="border-collapse w-full table-auto sm:table-fixed">
-              <tbody>
-                {state.sheetData.rows.map((row) => (
-                  <tr key={row.index} className="h-12 sm:h-10 border-b border-gray-200 hover:bg-gray-50">
-                    {/* Render cells optimized for mobile */}
-                    {row.cells.slice(0, 12).map((cell) => {  // Limit columns for mobile performance
-                      const assignKey = `${cell.row}:${cell.col}`;
-                      const assignment = state.assignments.get(assignKey);
-                      
-                      let sigImgUrl = null;
-                      if (assignment) {
-                         const sigs = state.signatures.get(assignment.signatureBaseName);
-                         const sig = sigs?.find(s => s.variant === assignment.signatureVariantId);
-                         sigImgUrl = sig?.previewUrl;
-                      }
+            {previewLoading && (
+              <div className="p-10 text-center text-gray-500 text-sm">
+                미리보기 렌더링 중입니다...
+              </div>
+            )}
 
-                      return (
-                        <td 
-                          key={cell.address} 
-                          className={`border-r border-gray-200 px-2 py-1 text-xs sm:text-sm relative min-w-[60px] sm:min-w-[80px] ${assignment ? 'bg-blue-50/30' : ''}`}
-                          title={`값: ${cell.value}`}
-                        >
-                          <div className="relative w-full h-full min-h-[40px] sm:min-h-[30px] flex items-center">
-                            <span className="z-0 text-gray-400 select-none truncate max-w-full text-xs">
-                              {cell.value}
-                            </span>
-                            
-                            {/* Overlay Signature with better sizing */}
-                            {assignment && sigImgUrl && (
-                              <div 
-                                className="absolute inset-0 z-10 flex items-center justify-center cursor-pointer group"
-                              >
-                                <img 
-                                  src={sigImgUrl} 
-                                  alt="sig" 
-                                  className="pointer-events-none drop-shadow-sm mix-blend-multiply transition-transform duration-300"
-                                  style={{
-                                    transform: `rotate(${assignment.rotation}deg) scale(${assignment.scale}) translate(${assignment.offsetX}px, ${assignment.offsetY}px)`,
-                                    maxWidth: '130%', 
-                                    maxHeight: '130%',
-                                    objectFit: 'contain'
-                                  }}
-                                />
-                                <div className="hidden group-hover:block absolute -top-8 left-0 bg-black text-white text-xs p-1 rounded whitespace-nowrap z-20 text-xs">
-                                  {assignment.signatureVariantId.substring(0, 15)}
+            {!previewLoading && previewModel && (
+              <table className="border-collapse w-full table-auto">
+                <tbody>
+                  {previewModel.rows.map((row) => (
+                    <tr key={`preview-row-${row.row}`} className="border-b border-gray-200 hover:bg-gray-50/40">
+                      {row.cells.map((cell) => {
+                        if (cell.hidden) return null;
+
+                        return (
+                          <td
+                            key={cell.key}
+                            rowSpan={cell.rowSpan}
+                            colSpan={cell.colSpan}
+                            className="border-r border-gray-200 px-2 py-1 text-xs sm:text-sm relative min-w-[60px] sm:min-w-[80px]"
+                            style={{
+                              fontFamily: cell.style.fontFamily,
+                              fontSize: cell.style.fontSize,
+                              fontWeight: cell.style.fontWeight,
+                              fontStyle: cell.style.fontStyle,
+                              textAlign: cell.style.textAlign,
+                              verticalAlign: cell.style.verticalAlign,
+                            }}
+                            title={`R${cell.row}C${cell.col}`}
+                          >
+                            <div className="relative w-full h-full min-h-[40px] sm:min-h-[30px] flex items-center justify-center">
+                              <span className="z-0 text-gray-700 select-none whitespace-pre-wrap break-words">
+                                {cell.text}
+                              </span>
+
+                              {cell.signature && (
+                                <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
+                                  <img
+                                    src={cell.signature.src}
+                                    alt="signature-preview"
+                                    className="drop-shadow-sm mix-blend-multiply"
+                                    style={{
+                                      transform: cell.signature.transform,
+                                      opacity: cell.signature.opacity,
+                                      maxWidth: '130%',
+                                      maxHeight: '130%',
+                                      objectFit: 'contain',
+                                    }}
+                                  />
                                 </div>
-                              </div>
-                            )}
-                          </div>
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                              )}
+                            </div>
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+
+            {!previewLoading && !previewModel && (
+              <div className="p-10 text-center text-gray-500 text-sm">
+                미리보기를 생성할 수 없습니다.
+              </div>
+            )}
           </div>
-          {state.sheetData.rows[0]?.cells.length > 12 && (
-            <p className="text-xs text-gray-500 mt-2 text-center">📱 모바일에서는 처음 12개 열만 표시됩니다</p>
+          {previewModel && (
+            <p className="text-xs text-gray-500 mt-2 text-center">
+              인쇄영역 기준 프리뷰: 행 {previewModel.printAreaRows.start}~{previewModel.printAreaRows.end}, 열 {previewModel.printAreaCols.start}~{previewModel.printAreaCols.end}
+            </p>
           )}
         </div>
       </div>

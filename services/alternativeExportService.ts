@@ -4,25 +4,76 @@ import ExcelJS from 'exceljs';
 import { SignatureAssignment, SignatureFile } from '../types';
 import { columnLetterToNumber, isSignaturePlaceholder, parsePrintAreaBounds } from './excelUtils';
 
+export interface PreviewCellModel {
+  key: string;
+  row: number;
+  col: number;
+  text: string;
+  hidden: boolean;
+  rowSpan?: number;
+  colSpan?: number;
+  style: {
+    fontFamily: string;
+    fontSize: string;
+    fontWeight: string;
+    fontStyle: string;
+    textAlign: 'left' | 'center' | 'right' | 'justify';
+    verticalAlign: 'top' | 'middle' | 'bottom';
+  };
+  signature?: {
+    src: string;
+    transform: string;
+    opacity: number;
+  };
+}
+
+export interface PreviewRowModel {
+  row: number;
+  cells: PreviewCellModel[];
+}
+
+export interface SheetPreviewModel {
+  rows: PreviewRowModel[];
+  printAreaRows: { start: number; end: number };
+  printAreaCols: { start: number; end: number };
+}
+
 /**
- * 엑셀 시트를 HTML 테이블로 렌더링하여 이미지로 변환하는 헬퍼 함수
+ * 병합 범위 문자열(예: A1:C3)을 파싱한다.
+ * - 잘못된 범위 문자열은 null로 반환하여 호출부에서 안전하게 무시한다.
  */
-const renderSheetToCanvas = async (
+const parseMergeRange = (range: string): { startRow: number; endRow: number; startCol: number; endCol: number } | null => {
+  const match = range.match(/([A-Z]+)(\d+):([A-Z]+)(\d+)/i);
+  if (!match) return null;
+
+  const startCol = columnLetterToNumber(match[1]);
+  const startRow = parseInt(match[2], 10);
+  const endCol = columnLetterToNumber(match[3]);
+  const endRow = parseInt(match[4], 10);
+
+  if (!startCol || !startRow || !endCol || !endRow) return null;
+  return { startRow, endRow, startCol, endCol };
+};
+
+/**
+ * 엑셀/미리보기 공용 모델 생성
+ * - alternativeExportService의 HTML 렌더링 로직과 동일한 데이터 기반으로
+ *   React 실시간 미리보기를 구성하기 위해 사용한다.
+ */
+export const buildSheetPreviewModel = async (
   originalBuffer: ArrayBuffer,
   assignments: Map<string, SignatureAssignment>,
   signaturesMap: Map<string, SignatureFile[]>,
   printAreaOnly: boolean = true
-): Promise<HTMLCanvasElement> => {
-  // 워크북 로드
+): Promise<SheetPreviewModel> => {
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(originalBuffer);
-  
+
   const worksheet = workbook.worksheets[0];
   if (!worksheet) {
-    throw new Error("워크시트를 찾을 수 없습니다.");
+    throw new Error('워크시트를 찾을 수 없습니다.');
   }
 
-  // 인쇄영역 파싱
   const originalPrintArea = worksheet.pageSetup?.printArea;
   let printAreaRows = { start: 1, end: worksheet.actualRowCount || 100 };
   let printAreaCols = { start: 1, end: worksheet.actualColumnCount || 26 };
@@ -37,108 +88,48 @@ const renderSheetToCanvas = async (
     printAreaCols = bounds.cols;
   }
 
-  console.log(`[렌더링] 행: ${printAreaRows.start}-${printAreaRows.end}, 열: ${printAreaCols.start}-${printAreaCols.end}`);
+  // 병합셀 인덱스 구성
+  const mergeRanges = (worksheet.model.merges || []) as string[];
+  const hiddenCellSet = new Set<string>();
+  const topLeftMergeMap = new Map<string, { rowSpan: number; colSpan: number }>();
 
-  // HTML 테이블 생성
-  const container = document.createElement('div');
-  container.style.position = 'absolute';
-  container.style.left = '-9999px';
-  container.style.top = '0';
-  container.style.background = 'white';
-  container.style.padding = '20px';
-  // 렌더링 품질 보강: 폰트/테두리 깨짐을 줄이기 위한 브라우저 렌더 힌트
-  container.style.textRendering = 'geometricPrecision';
-  container.style.webkitFontSmoothing = 'antialiased';
-  container.style.fontKerning = 'normal';
-  document.body.appendChild(container);
+  for (const mergeText of mergeRanges) {
+    const parsed = parseMergeRange(mergeText);
+    if (!parsed) continue;
 
-  const table = document.createElement('table');
-  table.style.borderCollapse = 'collapse';
-  table.style.fontFamily = 'Arial, sans-serif';
-  table.style.fontSize = '12px';
-  table.style.background = 'white';
-  table.style.tableLayout = 'fixed';
-  table.style.borderSpacing = '0';
+    const { startRow, endRow, startCol, endCol } = parsed;
+    topLeftMergeMap.set(`${startRow}:${startCol}`, {
+      rowSpan: endRow - startRow + 1,
+      colSpan: endCol - startCol + 1,
+    });
 
-  // 서명 파일 찾기 헬퍼
+    for (let r = startRow; r <= endRow; r++) {
+      for (let c = startCol; c <= endCol; c++) {
+        if (!(r === startRow && c === startCol)) {
+          hiddenCellSet.add(`${r}:${c}`);
+        }
+      }
+    }
+  }
+
   const findSigFile = (name: string, variant: string) => {
     const list = signaturesMap.get(name);
     return list?.find(s => s.variant === variant);
   };
 
-  // 행 렌더링
+  const rows: PreviewRowModel[] = [];
+
   for (let r = printAreaRows.start; r <= printAreaRows.end; r++) {
     const row = worksheet.getRow(r);
-    const tr = document.createElement('tr');
+    const cells: PreviewCellModel[] = [];
 
     for (let c = printAreaCols.start; c <= printAreaCols.end; c++) {
       const cell = row.getCell(c);
-      const td = document.createElement('td');
-      
-      // 기본 스타일
-      td.style.border = '1px solid #ddd';
-      td.style.padding = '8px';
-      td.style.minWidth = '80px';
-      td.style.minHeight = '40px';
-      td.style.position = 'relative';
-      td.style.verticalAlign = 'middle';
-      td.style.textAlign = 'center';
-      td.style.boxSizing = 'border-box';
-      td.style.whiteSpace = 'pre-wrap';
-      td.style.overflow = 'hidden';
+      const cellKey = `${r}:${c}`;
+      const isHidden = hiddenCellSet.has(cellKey);
 
-      // 엑셀 셀 스타일을 최대한 HTML에 반영하여 PDF/PNG에서도 시각 일관성 유지
-      if (cell.style?.font) {
-        if (cell.style.font.name) td.style.fontFamily = cell.style.font.name;
-        if (cell.style.font.size) td.style.fontSize = `${cell.style.font.size}px`;
-        if (cell.style.font.bold) td.style.fontWeight = '700';
-        if (cell.style.font.italic) td.style.fontStyle = 'italic';
-      }
-      if (cell.style?.alignment) {
-        const horizontal = cell.style.alignment.horizontal;
-        const vertical = cell.style.alignment.vertical;
-        if (horizontal === 'left' || horizontal === 'center' || horizontal === 'right' || horizontal === 'justify') {
-          td.style.textAlign = horizontal;
-        }
-        if (vertical === 'top' || vertical === 'middle' || vertical === 'bottom') {
-          td.style.verticalAlign = vertical;
-        }
-      }
-
-      // 셀 병합 처리
-      if (cell.isMerged) {
-        const master = cell.master;
-        if (master && master.row !== r) {
-          // 병합된 셀의 하위 셀은 숨김
-          td.style.display = 'none';
-        } else if (master) {
-          // 병합된 셀의 마스터 셀
-          const mergeRange = worksheet.model.merges?.find((merge: string) => {
-            const match = merge.match(/([A-Z]+)(\d+):([A-Z]+)(\d+)/i);
-            if (match) {
-              const startRow = parseInt(match[2]);
-              const startCol = columnLetterToNumber(match[1]);
-              return startRow === r && startCol === c;
-            }
-            return false;
-          });
-          
-          if (mergeRange) {
-            // rowspan/colspan 계산
-            const match = mergeRange.match(/([A-Z]+)(\d+):([A-Z]+)(\d+)/i);
-            if (match) {
-              const startRow = parseInt(match[2]);
-              const endRow = parseInt(match[4]);
-              td.rowSpan = endRow - startRow + 1;
-            }
-          }
-        }
-      }
-
-      // 셀 값 표시
-      const cellValue = cell.value;
       let displayValue = '';
-      
+      const cellValue = cell.value;
       if (cellValue !== null && cellValue !== undefined) {
         if (typeof cellValue === 'object') {
           if ('result' in cellValue) {
@@ -153,46 +144,169 @@ const renderSheetToCanvas = async (
         }
       }
 
-      // 서명 배치 확인
-      const assignKey = `${r}:${c}`;
-      const assignment = assignments.get(assignKey);
-      
+      const assignment = assignments.get(cellKey);
+      let signature: PreviewCellModel['signature'];
+
       if (assignment) {
         const sigFile = findSigFile(assignment.signatureBaseName, assignment.signatureVariantId);
         if (sigFile && sigFile.previewUrl && sigFile.width > 0 && sigFile.height > 0) {
-          // placeholder 텍스트 유지 후 서명 이미지 오버레이
-          td.style.position = 'relative';
-          if (displayValue) {
-            const span = document.createElement('span');
-            span.textContent = displayValue;
-            span.style.position = 'relative';
-            span.style.zIndex = '0';
-            td.appendChild(span);
-          }
-          const img = document.createElement('img');
-          img.src = sigFile.previewUrl;
-          img.style.maxWidth = '120px';
-          img.style.maxHeight = '60px';
-          img.style.display = 'block';
-          img.style.position = 'absolute';
-          img.style.top = '0';
-          img.style.left = '50%';
-          img.style.zIndex = '1';
-          img.style.transform = `translateX(-50%) rotate(${assignment.rotation}deg) scale(${assignment.scale})`;
-          td.appendChild(img);
-        } else if (displayValue) {
-          // 방어적 코드: 손상된 서명 파일이면 프로세스를 중단하지 않고 텍스트만 유지
-          td.textContent = displayValue;
+          // 미리보기에서 실제 배치와 동일한 변형값을 보여주되,
+          // 글자/테두리 가림을 줄이기 위해 투명도와 blend를 함께 사용한다.
+          signature = {
+            src: sigFile.previewUrl,
+            transform: `translate(${assignment.offsetX}px, ${assignment.offsetY}px) rotate(${assignment.rotation}deg) scale(${assignment.scale})`,
+            opacity: 0.78,
+          };
         }
-      } else if (displayValue && !isSignaturePlaceholder(displayValue)) {
-        // 일반 텍스트 표시 (placeholder가 아닌 경우)
-        td.textContent = displayValue;
+      }
+
+      const horizontal = cell.style?.alignment?.horizontal;
+      const vertical = cell.style?.alignment?.vertical;
+
+      const previewCell: PreviewCellModel = {
+        key: `${r}-${c}`,
+        row: r,
+        col: c,
+        text: displayValue,
+        hidden: isHidden,
+        style: {
+          fontFamily: cell.style?.font?.name || 'Arial, sans-serif',
+          fontSize: `${cell.style?.font?.size || 12}px`,
+          fontWeight: cell.style?.font?.bold ? '700' : '400',
+          fontStyle: cell.style?.font?.italic ? 'italic' : 'normal',
+          textAlign: (horizontal === 'left' || horizontal === 'center' || horizontal === 'right' || horizontal === 'justify') ? horizontal : 'center',
+          verticalAlign: (vertical === 'top' || vertical === 'middle' || vertical === 'bottom') ? vertical : 'middle',
+        },
+        signature,
+      };
+
+      const mergeInfo = topLeftMergeMap.get(cellKey);
+      if (mergeInfo) {
+        previewCell.rowSpan = mergeInfo.rowSpan;
+        previewCell.colSpan = mergeInfo.colSpan;
+      }
+
+      cells.push(previewCell);
+    }
+
+    rows.push({ row: r, cells });
+  }
+
+  return {
+    rows,
+    printAreaRows,
+    printAreaCols,
+  };
+};
+
+/**
+ * 프리뷰 모델을 실제 HTML 테이블로 변환
+ * - PDF/PNG 렌더링과 React 미리보기의 결과를 최대한 일치시키기 위해
+ *   공용 모델을 동일하게 사용한다.
+ */
+const createTableFromPreviewModel = (model: SheetPreviewModel): HTMLTableElement => {
+  const table = document.createElement('table');
+  table.style.borderCollapse = 'collapse';
+  table.style.fontFamily = 'Arial, sans-serif';
+  table.style.fontSize = '12px';
+  table.style.background = 'white';
+  table.style.tableLayout = 'fixed';
+  table.style.borderSpacing = '0';
+
+  for (const rowModel of model.rows) {
+    const tr = document.createElement('tr');
+
+    for (const cellModel of rowModel.cells) {
+      if (cellModel.hidden) {
+        continue;
+      }
+
+      const td = document.createElement('td');
+      td.style.border = '1px solid #ddd';
+      td.style.padding = '8px';
+      td.style.minWidth = '80px';
+      td.style.minHeight = '40px';
+      td.style.position = 'relative';
+      td.style.boxSizing = 'border-box';
+      td.style.whiteSpace = 'pre-wrap';
+      td.style.overflow = 'hidden';
+      td.style.textAlign = cellModel.style.textAlign;
+      td.style.verticalAlign = cellModel.style.verticalAlign;
+      td.style.fontFamily = cellModel.style.fontFamily;
+      td.style.fontSize = cellModel.style.fontSize;
+      td.style.fontWeight = cellModel.style.fontWeight;
+      td.style.fontStyle = cellModel.style.fontStyle;
+
+      if (cellModel.rowSpan && cellModel.rowSpan > 1) {
+        td.rowSpan = cellModel.rowSpan;
+      }
+      if (cellModel.colSpan && cellModel.colSpan > 1) {
+        td.colSpan = cellModel.colSpan;
+      }
+
+      if (cellModel.signature) {
+        if (cellModel.text) {
+          const span = document.createElement('span');
+          span.textContent = cellModel.text;
+          span.style.position = 'relative';
+          span.style.zIndex = '0';
+          td.appendChild(span);
+        }
+
+        const img = document.createElement('img');
+        img.src = cellModel.signature.src;
+        img.style.maxWidth = '120px';
+        img.style.maxHeight = '60px';
+        img.style.display = 'block';
+        img.style.position = 'absolute';
+        img.style.top = '50%';
+        img.style.left = '50%';
+        img.style.zIndex = '1';
+        img.style.opacity = `${cellModel.signature.opacity}`;
+        img.style.mixBlendMode = 'multiply';
+        img.style.transform = `translate(-50%, -50%) ${cellModel.signature.transform}`;
+        td.appendChild(img);
+      } else if (cellModel.text && !isSignaturePlaceholder(cellModel.text)) {
+        td.textContent = cellModel.text;
+      } else {
+        td.textContent = cellModel.text;
       }
 
       tr.appendChild(td);
     }
+
     table.appendChild(tr);
   }
+
+  return table;
+};
+
+/**
+ * 엑셀 시트를 HTML 테이블로 렌더링하여 이미지로 변환하는 헬퍼 함수
+ */
+const renderSheetToCanvas = async (
+  originalBuffer: ArrayBuffer,
+  assignments: Map<string, SignatureAssignment>,
+  signaturesMap: Map<string, SignatureFile[]>,
+  printAreaOnly: boolean = true
+): Promise<HTMLCanvasElement> => {
+  const previewModel = await buildSheetPreviewModel(originalBuffer, assignments, signaturesMap, printAreaOnly);
+  console.log(`[렌더링] 행: ${previewModel.printAreaRows.start}-${previewModel.printAreaRows.end}, 열: ${previewModel.printAreaCols.start}-${previewModel.printAreaCols.end}`);
+
+  // HTML 테이블 생성
+  const container = document.createElement('div');
+  container.style.position = 'absolute';
+  container.style.left = '-9999px';
+  container.style.top = '0';
+  container.style.background = 'white';
+  container.style.padding = '20px';
+  // 렌더링 품질 보강: 폰트/테두리 깨짐을 줄이기 위한 브라우저 렌더 힌트
+  container.style.textRendering = 'geometricPrecision';
+  container.style.webkitFontSmoothing = 'antialiased';
+  container.style.fontKerning = 'normal';
+  document.body.appendChild(container);
+
+  const table = createTableFromPreviewModel(previewModel);
 
   container.appendChild(table);
 

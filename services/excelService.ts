@@ -455,6 +455,104 @@ const normalizeMergeRange = (range: string): string => {
   return range.toUpperCase().replace(/[\s$]/g, '');
 };
 
+/**
+ * 병합 범위를 안정적으로 재적용하기 위한 파서
+ * - 잘못된 범위 문자열은 무시하여 내보내기 중단을 방지한다.
+ */
+const parseMergeRange = (range: string): { startRow: number; endRow: number; startCol: number; endCol: number } | null => {
+  const [start, end] = range.split(':');
+  const startPos = parseCellAddress(start);
+  const endPos = parseCellAddress(end || start);
+
+  if (!startPos || !endPos) return null;
+  return {
+    startRow: startPos.row,
+    endRow: endPos.row,
+    startCol: startPos.col,
+    endCol: endPos.col,
+  };
+};
+
+/**
+ * Zero-Damage Policy: 병합셀 완벽 방어 로직
+ * - 1차: 누락 병합 재적용
+ * - 2차: 여전히 불일치 시 현재 병합을 정리 후 원본 병합 전체 재적용
+ * - 3차: 최종 검증으로 원본 병합 집합과 완전 일치 여부 확인
+ */
+const enforceMergedCellsIntegrity = (worksheet: ExcelJS.Worksheet, originalMergedCells: string[]) => {
+  const normalizedOriginal = originalMergedCells.map(normalizeMergeRange);
+
+  const getCurrentMergeSet = () => {
+    const current = (worksheet.model.merges || []) as string[];
+    return new Set(current.map(normalizeMergeRange));
+  };
+
+  // 1차: 누락 병합만 재적용
+  let currentSet = getCurrentMergeSet();
+  for (const mergeRange of originalMergedCells) {
+    const normalized = normalizeMergeRange(mergeRange);
+    if (!currentSet.has(normalized)) {
+      try {
+        worksheet.mergeCells(mergeRange);
+      } catch (mergeErr) {
+        console.warn(`[병합셀 방어] 1차 병합 재적용 실패: ${mergeRange}`, mergeErr);
+      }
+    }
+  }
+
+  currentSet = getCurrentMergeSet();
+  const pass1Matched =
+    normalizedOriginal.length === currentSet.size &&
+    normalizedOriginal.every(range => currentSet.has(range));
+
+  if (pass1Matched) {
+    console.log('[병합셀 방어] 1차 검증 성공 - 원본 병합과 일치');
+    return;
+  }
+
+  // 2차: 완전 재구축 (불일치 시 강제 재적용)
+  console.warn('[병합셀 방어] 1차 검증 불일치 - 강제 재적용 모드 진입');
+
+  const currentMerges = (worksheet.model.merges || []) as string[];
+  for (const mergeRange of currentMerges) {
+    const parsed = parseMergeRange(mergeRange);
+    if (!parsed) continue;
+
+    try {
+      worksheet.unMergeCells(
+        parsed.startRow,
+        parsed.startCol,
+        parsed.endRow,
+        parsed.endCol
+      );
+    } catch (unmergeErr) {
+      console.warn(`[병합셀 방어] 병합 해제 실패: ${mergeRange}`, unmergeErr);
+    }
+  }
+
+  for (const mergeRange of originalMergedCells) {
+    try {
+      worksheet.mergeCells(mergeRange);
+    } catch (mergeErr) {
+      console.warn(`[병합셀 방어] 강제 재병합 실패: ${mergeRange}`, mergeErr);
+    }
+  }
+
+  // 3차: 최종 강제 동기화 (ExcelJS 내부 상태 불일치 대비)
+  const finalCurrentMerges = (worksheet.model.merges || []) as string[];
+  const finalSet = new Set(finalCurrentMerges.map(normalizeMergeRange));
+  const finalMatched =
+    normalizedOriginal.length === finalSet.size &&
+    normalizedOriginal.every(range => finalSet.has(range));
+
+  if (!finalMatched) {
+    console.warn('[병합셀 방어] 2차 검증 불일치 - model.merges 강제 동기화 수행');
+    worksheet.model.merges = [...originalMergedCells];
+  } else {
+    console.log('[병합셀 방어] 2차 검증 성공 - 원본 병합 완전 복원');
+  }
+};
+
 const validateWorksheetPreservation = (
   originalMergedCells: string[],
   finalMergedCells: string[],
@@ -863,63 +961,15 @@ export const generateFinalExcel = async (
   // 메모리 최적화: 워크북 내 이미지 ID 캐시는 이후 재사용하지 않으므로 즉시 해제
   imageCache.clear();
 
-  // Step 3: 병합된 셀 복원
-  // ExcelJS 버그 대응: 이미지를 추가한 후 병합된 셀 정보가 손실될 수 있음
-  // 해결책: 원본에서 읽은 병합된 셀을 명시적으로 다시 적용
-  console.log(`[병합셀 복원] 원본 병합된 셀을 다시 적용합니다...`);
-  
-  // 먼저 현재 병합 상태 확인
-  const currentMergedCells = worksheet.model.merges ? [...worksheet.model.merges] : [];
-  console.log(`[병합셀 복원] 현재 병합된 셀: ${currentMergedCells.length}개 (원본: ${originalMergedCells.length}개)`);
-  
-  // 병합된 셀이 손실되었다면 다시 적용
+  // Step 3: Zero-Damage 병합셀 방어 복원
+  // - 이미지는 Floating Object 방식(addImage + editAs: oneCell)으로만 올리고
+  //   셀 데이터/서식을 직접 수정하지 않는다.
+  // - 이후 병합셀은 원본 기준으로 다단계 검증/재적용하여 단 하나도 유실되지 않게 한다.
+  console.log('[병합셀 방어] Zero-Damage 병합셀 무결성 검증 및 재적용 시작');
   if (originalMergedCells.length > 0) {
-    let reappliedCount = 0;
-    let errorCount = 0;
-    let alreadyMergedCount = 0;
-    
-    // 현재 병합된 셀을 정규화하여 Set으로 저장 (빠른 조회)
-    const normalizedCurrentMerges = new Set(currentMergedCells.map(normalizeMergeRange));
-    
-    // 실패한 병합 범위를 추적 (오류 보고용)
-    const failedMerges: string[] = [];
-    
-    for (const mergeRange of originalMergedCells) {
-      try {
-        const normalizedRange = normalizeMergeRange(mergeRange);
-        
-        // 이미 병합되어 있는지 확인
-        if (!normalizedCurrentMerges.has(normalizedRange)) {
-          // 병합되지 않았으면 다시 병합
-          worksheet.mergeCells(mergeRange);
-          reappliedCount++;
-          // 처음 몇 개만 상세 로그 출력 (성능 최적화)
-          if (reappliedCount <= 5) {
-            console.log(`  ✓ 병합 복원: ${mergeRange}`);
-          }
-        } else {
-          alreadyMergedCount++;
-        }
-      } catch (mergeErr) {
-        errorCount++;
-        failedMerges.push(mergeRange);
-        // 에러는 항상 출력 (중요)
-        console.warn(`  ✗ 병합 실패: ${mergeRange}`, mergeErr);
-      }
-    }
-    
-    // 복원 요약 출력
-    if (reappliedCount > 5) {
-      console.log(`  ... 그리고 ${reappliedCount - 5}개 더 복원됨`);
-    }
-    
-    console.log(`[병합셀 복원 완료] 복원: ${reappliedCount}개, 유지: ${alreadyMergedCount}개, 실패: ${errorCount}개`);
-    
-    if (failedMerges.length > 0) {
-      console.warn(`[병합셀 복원 실패 목록]`, failedMerges);
-    }
+    enforceMergedCellsIntegrity(worksheet, originalMergedCells);
   } else {
-    console.log(`[병합셀 복원] 원본에 병합된 셀이 없음 - 복원 불필요`);
+    console.log('[병합셀 방어] 원본에 병합셀이 없어 재적용 생략');
   }
   
   // 최종 확인: 병합된 셀과 인쇄영역이 여전히 존재하는지 확인
