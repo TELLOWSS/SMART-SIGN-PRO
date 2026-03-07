@@ -1,6 +1,6 @@
 import ExcelJS from 'exceljs';
 import { SheetData, RowData, CellData, SignatureFile, SignatureAssignment } from '../types';
-import { columnNumberToLetter, parseCellAddress, isSignaturePlaceholder, randomInt, parsePrintAreaBounds } from './excelUtils';
+import { columnNumberToLetter, parseCellAddress, isSignaturePlaceholder, randomInt, randomFloat, parsePrintAreaBounds } from './excelUtils';
 
 /**
  * 매칭을 위해 이름 정규화
@@ -40,6 +40,19 @@ const getCellValueAsString = (cell: ExcelJS.Cell | undefined): string => {
 };
 
 /**
+ * 배열을 보안 난수 기반으로 셔플(Fisher-Yates)
+ * - 같은 행에서 서명 variant 반복 패턴이 눈에 띄지 않도록 순서를 섞는다.
+ */
+const shuffleArray = <T>(source: T[]): T[] => {
+  const result = [...source];
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = randomInt(0, i);
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
+};
+
+/**
  * 이미지 회전 및 최적화 헬퍼 함수 (High Quality V4)
  * Input: Blob URL (memory efficient)
  * Output: Data URL (Base64)
@@ -67,7 +80,8 @@ const rotateImage = async (blobUrl: string, degrees: number): Promise<string> =>
         const ctx = canvas.getContext('2d');
         if (!ctx) { 
           console.warn("Canvas context not available");
-          resolve(blobUrl); 
+          img.src = '';
+          resolve(''); 
           return; 
         }
 
@@ -92,6 +106,7 @@ const rotateImage = async (blobUrl: string, degrees: number): Promise<string> =>
         // Check canvas size limits (most browsers: 16384 x 16384)
         if (canvas.width > 16384 || canvas.height > 16384) {
           console.warn("Canvas size exceeds limits, using original");
+          img.src = '';
           resolve("");
           return;
         }
@@ -113,22 +128,26 @@ const rotateImage = async (blobUrl: string, degrees: number): Promise<string> =>
         
         canvas.width = 1;
         canvas.height = 1;
+        img.src = '';
         
         console.log(`✓ Image rotated: ${normalizedDegrees}° → ${dataUrl.length} bytes`);
         resolve(dataUrl);
       } catch (err) {
         console.error("Image rotation error:", err);
+        img.src = '';
         resolve("");
       }
     };
 
     img.onerror = (event) => {
         console.error("Image load error:", blobUrl, event);
+        img.src = '';
         resolve(""); 
     };
 
     img.onabort = () => {
         console.error("Image load aborted:", blobUrl);
+        img.src = '';
         resolve("");
     };
 
@@ -285,10 +304,31 @@ export const autoMatchSignatures = (
 
     const availableSigs = signatures.get(cleanName);
     
-    if (availableSigs && availableSigs.length > 0) {
+    // 방어적 코드: 손상된 파일/빈 variant를 제외한 유효 서명만 사용
+    const validAvailableSigs = (availableSigs || []).filter((sig): sig is SignatureFile => {
+      return !!sig && typeof sig.variant === 'string' && sig.variant.trim().length > 0;
+    });
+
+    if (validAvailableSigs.length > 0) {
       // Track used signature variants in this row to prevent immediate reuse
       // This creates more natural variation when multiple placeholders exist
       const usedVariantsInRow = new Set<string>();
+      const queuedVariantsInRow: SignatureFile[] = [];
+
+      // 지능적 셔플링: 사용 가능한 후보군을 무작위로 섞어 큐에 채운다.
+      // - 일반 상황: 아직 사용하지 않은 variant들만 셔플
+      // - 모든 variant 소진 후 리셋 상황: 전체 variant를 다시 셔플
+      const refillVariantQueue = () => {
+        const remaining = validAvailableSigs.filter(sig => !usedVariantsInRow.has(sig.variant));
+        const refillSource = remaining.length > 0 ? remaining : validAvailableSigs;
+
+        if (remaining.length === 0) {
+          usedVariantsInRow.clear();
+        }
+
+        const shuffled = shuffleArray(refillSource);
+        queuedVariantsInRow.push(...shuffled);
+      };
       
       for (const cell of row.cells) {
         if (cell.col === nameColIndex) continue;
@@ -306,20 +346,21 @@ export const autoMatchSignatures = (
           }
           
           const key = `${cell.row}:${cell.col}`;
-          
-          // Select a signature variant, preferring unused ones in this row
-          let selectedSig;
-          const unusedSigs = availableSigs.filter(sig => !usedVariantsInRow.has(sig.variant));
-          
-          if (unusedSigs.length > 0) {
-            // Use an unused variant if available
-            const randomSigIndex = Math.floor(Math.random() * unusedSigs.length);
-            selectedSig = unusedSigs[randomSigIndex];
-          } else {
-            // All variants used in this row, reset and pick any
-            usedVariantsInRow.clear();
-            const randomSigIndex = Math.floor(Math.random() * availableSigs.length);
-            selectedSig = availableSigs[randomSigIndex];
+
+          if (queuedVariantsInRow.length === 0) {
+            refillVariantQueue();
+          }
+
+          let selectedSig = queuedVariantsInRow.shift();
+
+          // 큐가 비정상적으로 비어 있거나 손상 데이터가 섞인 경우를 대비한 방어 로직
+          while (selectedSig && (!selectedSig.variant || selectedSig.variant.trim().length === 0)) {
+            selectedSig = queuedVariantsInRow.shift();
+          }
+
+          if (!selectedSig && validAvailableSigs.length > 0) {
+            refillVariantQueue();
+            selectedSig = queuedVariantsInRow.shift();
           }
           
           // Safety check: ensure we have a valid signature
@@ -334,7 +375,8 @@ export const autoMatchSignatures = (
           // Random offset calculations for natural variation
           // Using helper function for cleaner code and consistent ranges
           const rotation = randomInt(-5, 5);    // -5 to 5 degrees
-          const scale = 0.95 + (Math.random() * 0.15); // 0.95 to 1.1 (continuous)
+          // 요청사항 반영: 기본 스케일을 1.15 ~ 1.35 범위로 상향
+          const scale = randomFloat(1.15, 1.35);
           const offsetX = randomInt(-4, 4);     // -4 to +4 px
           const offsetY = randomInt(-2, 2);     // -2 to +2 px
 
@@ -515,6 +557,81 @@ export const generateFinalExcel = async (
     return list?.find(s => s.variant === variant);
   };
 
+  /**
+   * Excel 열 너비(문자 단위)를 픽셀로 변환
+   * - Excel 기본 폭(8.43ch)과 렌더링 패딩을 고려해 근사치 계산
+   */
+  const getColumnPixelWidth = (col: number): number => {
+    const DEFAULT_COL_WIDTH_CH = 8.43;
+    const PIXELS_PER_CHAR = 7;
+    const CELL_PADDING = 5;
+    const widthChars = worksheet.getColumn(col).width || DEFAULT_COL_WIDTH_CH;
+    return Math.max(24, Math.round(widthChars * PIXELS_PER_CHAR + CELL_PADDING));
+  };
+
+  /**
+   * Excel 행 높이(pt)를 픽셀로 변환
+   * - 기본 행 높이 15pt를 사용하며, 브라우저 96DPI 기준으로 환산
+   */
+  const getRowPixelHeight = (row: number): number => {
+    const DEFAULT_ROW_HEIGHT_PT = 15;
+    const PIXELS_PER_POINT = 96 / 72;
+    const rowHeightPt = worksheet.getRow(row).height || DEFAULT_ROW_HEIGHT_PT;
+    return Math.max(18, Math.round(rowHeightPt * PIXELS_PER_POINT));
+  };
+
+  /**
+   * 특정 셀이 병합셀의 좌상단인 경우 해당 병합 범위를 반환
+   */
+  const getMergedRangeForTopLeft = (row: number, col: number): { startRow: number; endRow: number; startCol: number; endCol: number } | null => {
+    for (const range of originalMergedCells) {
+      const [start, end] = range.split(':');
+      const startPos = parseCellAddress(start);
+      const endPos = parseCellAddress(end || start);
+
+      if (!startPos || !endPos) continue;
+
+      if (startPos.row === row && startPos.col === col) {
+        return {
+          startRow: startPos.row,
+          endRow: endPos.row,
+          startCol: startPos.col,
+          endCol: endPos.col,
+        };
+      }
+    }
+    return null;
+  };
+
+  /**
+   * 서명 배치 대상 셀(또는 병합셀)의 실제 렌더링 영역(픽셀)을 계산
+   */
+  const getTargetCellBox = (row: number, col: number): { width: number; height: number } => {
+    const mergedRange = getMergedRangeForTopLeft(row, col);
+
+    if (!mergedRange) {
+      return {
+        width: getColumnPixelWidth(col),
+        height: getRowPixelHeight(row),
+      };
+    }
+
+    let totalWidth = 0;
+    let totalHeight = 0;
+
+    for (let c = mergedRange.startCol; c <= mergedRange.endCol; c++) {
+      totalWidth += getColumnPixelWidth(c);
+    }
+    for (let r = mergedRange.startRow; r <= mergedRange.endRow; r++) {
+      totalHeight += getRowPixelHeight(r);
+    }
+
+    return {
+      width: Math.max(24, totalWidth),
+      height: Math.max(18, totalHeight),
+    };
+  };
+
   // 좌표가 인쇄영역 내인지 확인
   const isInPrintArea = (row: number, col: number) => {
     return row >= printAreaRows.start && row <= printAreaRows.end &&
@@ -574,6 +691,13 @@ export const generateFinalExcel = async (
         continue;
       }
 
+      // 방어적 코드: 손상 이미지/빈 variant/비정상 크기 데이터 차단
+      if (!sigFile.previewUrl || !sigFile.variant || sigFile.width <= 0 || sigFile.height <= 0) {
+        console.warn(`  ✗ 손상된 서명 파일 데이터 감지: ${assignment.signatureVariantId}`);
+        failureCount++;
+        continue;
+      }
+
       // 이미지 캐시 키
       const cacheKey = `${sigFile.variant}_rot${assignment.rotation}`;
       let imageId = imageCache.get(cacheKey);
@@ -581,7 +705,7 @@ export const generateFinalExcel = async (
       // 새 이미지인 경우만 로테이션 처리
       if (imageId === undefined) {
         try {
-          const rotatedDataUrl = await rotateImage(sigFile.previewUrl, assignment.rotation);
+          let rotatedDataUrl = await rotateImage(sigFile.previewUrl, assignment.rotation);
           
           if (!rotatedDataUrl || rotatedDataUrl.length === 0) {
             console.warn(`  ✗ 이미지 로테이션 실패: ${sigFile.variant} (${assignment.rotation}°)`);
@@ -590,7 +714,7 @@ export const generateFinalExcel = async (
           }
 
           const parts = rotatedDataUrl.split(',');
-          const base64Clean = parts.length > 1 ? parts[1] : parts[0];
+          let base64Clean = parts.length > 1 ? parts[1] : parts[0];
 
           if (!base64Clean || base64Clean.length === 0) {
             console.warn(`  ✗ Base64 변환 실패: ${sigFile.variant}`);
@@ -610,6 +734,10 @@ export const generateFinalExcel = async (
             console.error(`  ✗ addImage 실패: ${sigFile.variant}`, imgAddErr);
             failureCount++;
             continue;
+          } finally {
+            // 메모리 최적화: 대용량 Base64 문자열 참조를 즉시 해제
+            base64Clean = '';
+            rotatedDataUrl = '';
           }
         } catch (rotErr) {
           console.warn(`  ✗ 로테이션 처리 오류: ${sigFile.variant}`, rotErr);
@@ -633,23 +761,63 @@ export const generateFinalExcel = async (
             continue;
           }
 
-          const MAX_BOX_WIDTH = 80 * assignment.scale;
-          const MAX_BOX_HEIGHT = 40 * assignment.scale;
-
+          // 동적 크기 계산:
+          // 1) 셀(또는 병합셀) 영역을 기준으로 더 좁은 축에 맞춘다.
+          // 2) scale(1.15~1.35)을 반영하되, 실제 사람이 서명 시 살짝 칸을 넘기는 느낌을 위해
+          //    오버플로우 허용치를 부여한다.
+          const box = getTargetCellBox(assignment.row, assignment.col);
+          const narrowSide = Math.max(16, Math.min(box.width, box.height));
+          const broadSide = Math.max(box.width, box.height);
           const imgRatio = sigFile.width / sigFile.height;
-          let finalWidth = MAX_BOX_WIDTH;
-          let finalHeight = MAX_BOX_WIDTH / imgRatio;
 
-          if (finalHeight > MAX_BOX_HEIGHT) {
-            finalHeight = MAX_BOX_HEIGHT;
-            finalWidth = MAX_BOX_HEIGHT * imgRatio;
+          // 좁은 축 기준 목표 길이: scale 상향을 반영하면서도 과도한 확장을 방지
+          const targetShortSide = narrowSide * (0.72 * assignment.scale);
+
+          let finalWidth = targetShortSide;
+          let finalHeight = targetShortSide;
+
+          if (imgRatio >= 1) {
+            finalHeight = targetShortSide;
+            finalWidth = finalHeight * imgRatio;
+          } else {
+            finalWidth = targetShortSide;
+            finalHeight = finalWidth / imgRatio;
+          }
+
+          // 긴 축은 셀 긴 축의 108%까지 허용 (살짝 넘치는 자연스러운 느낌)
+          const maxLongSide = broadSide * 1.08;
+          if (Math.max(finalWidth, finalHeight) > maxLongSide) {
+            const ratio = maxLongSide / Math.max(finalWidth, finalHeight);
+            finalWidth *= ratio;
+            finalHeight *= ratio;
           }
 
           const intWidth = Math.round(finalWidth);
           const intHeight = Math.round(finalHeight);
 
-          const baseOffsetX = 5 + assignment.offsetX;
-          const baseOffsetY = 2 + assignment.offsetY;
+          // 동적 여백/오버플로우 계산:
+          // - 기본적으로 중앙 정렬
+          // - 사용자 배정 offset + 자연스러운 편차 반영
+          // - 셀 경계를 완전히 벗어나지 않도록 안전 범위에서 클램프
+          const overflowAllowanceX = Math.max(2, Math.round(box.width * 0.04));
+          const overflowAllowanceY = Math.max(1, Math.round(box.height * 0.06));
+          const centeredOffsetX = Math.round((box.width - intWidth) / 2);
+          const centeredOffsetY = Math.round((box.height - intHeight) / 2);
+
+          const naturalOffsetX = centeredOffsetX + assignment.offsetX;
+          const naturalOffsetY = centeredOffsetY + assignment.offsetY;
+
+          const clampedOffsetX = Math.max(
+            -overflowAllowanceX,
+            Math.min(box.width - intWidth + overflowAllowanceX, naturalOffsetX)
+          );
+          const clampedOffsetY = Math.max(
+            -overflowAllowanceY,
+            Math.min(box.height - intHeight + overflowAllowanceY, naturalOffsetY)
+          );
+
+          const baseOffsetX = clampedOffsetX;
+          const baseOffsetY = clampedOffsetY;
 
           const emuColOff = Math.max(0, Math.round(baseOffsetX * EMU_PER_PIXEL));
           const emuRowOff = Math.max(0, Math.round(baseOffsetY * EMU_PER_PIXEL));
@@ -692,6 +860,8 @@ export const generateFinalExcel = async (
   console.log(`  실패: ${failureCount}개`);
   console.log(`  스킵: ${skippedCount}개`);
   console.log(`  캐시됨: ${assignmentValues.length - processedCount - failureCount - skippedCount}개`);
+  // 메모리 최적화: 워크북 내 이미지 ID 캐시는 이후 재사용하지 않으므로 즉시 해제
+  imageCache.clear();
 
   // Step 3: 병합된 셀 복원
   // ExcelJS 버그 대응: 이미지를 추가한 후 병합된 셀 정보가 손실될 수 있음

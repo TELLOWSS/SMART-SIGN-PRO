@@ -48,13 +48,49 @@ export const isSignaturePlaceholder = (value: string): boolean => {
 };
 
 /**
+ * 보안 난수용 Uint32 최대값 상수
+ * - 나눗셈 기반 정규화 시 일관된 기준값으로 사용
+ */
+const UINT32_MAX = 0xFFFFFFFF;
+
+/**
+ * Web Crypto 기반 보안 난수(0 이상 1 미만) 생성
+ * - Math.random() 대신 예측 불가능한 난수를 사용하여
+ *   서명 배치 패턴의 재현 가능성을 낮춘다.
+ * - 보안 요구사항을 위해 crypto 미지원 환경에서는 명시적으로 오류를 발생시킨다.
+ */
+const secureRandom = (): number => {
+  const cryptoObj = globalThis.crypto;
+
+  if (cryptoObj?.getRandomValues) {
+    const array = new Uint32Array(1);
+    cryptoObj.getRandomValues(array);
+    return array[0] / (UINT32_MAX + 1);
+  }
+
+  throw new Error('보안 난수 생성기(crypto.getRandomValues)를 사용할 수 없습니다.');
+};
+
+/**
  * 랜덤 정수 생성 헬퍼 함수 (min과 max 포함)
  * @param min 최소값 (포함)
  * @param max 최대값 (포함)
  * @returns min과 max 사이의 랜덤 정수
  */
 export const randomInt = (min: number, max: number): number => {
-  return Math.floor(Math.random() * (max - min + 1)) + min;
+  const normalizedMin = Math.ceil(Math.min(min, max));
+  const normalizedMax = Math.floor(Math.max(min, max));
+  return Math.floor(secureRandom() * (normalizedMax - normalizedMin + 1)) + normalizedMin;
+};
+
+/**
+ * 랜덤 실수 생성 헬퍼 함수 (min 이상 max 미만)
+ * - 서명 scale처럼 연속값이 필요한 경우 사용
+ */
+export const randomFloat = (min: number, max: number): number => {
+  const normalizedMin = Math.min(min, max);
+  const normalizedMax = Math.max(min, max);
+  return secureRandom() * (normalizedMax - normalizedMin) + normalizedMin;
 };
 
 export interface PrintAreaBounds {

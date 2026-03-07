@@ -46,6 +46,10 @@ const renderSheetToCanvas = async (
   container.style.top = '0';
   container.style.background = 'white';
   container.style.padding = '20px';
+  // 렌더링 품질 보강: 폰트/테두리 깨짐을 줄이기 위한 브라우저 렌더 힌트
+  container.style.textRendering = 'geometricPrecision';
+  container.style.webkitFontSmoothing = 'antialiased';
+  container.style.fontKerning = 'normal';
   document.body.appendChild(container);
 
   const table = document.createElement('table');
@@ -53,6 +57,8 @@ const renderSheetToCanvas = async (
   table.style.fontFamily = 'Arial, sans-serif';
   table.style.fontSize = '12px';
   table.style.background = 'white';
+  table.style.tableLayout = 'fixed';
+  table.style.borderSpacing = '0';
 
   // 서명 파일 찾기 헬퍼
   const findSigFile = (name: string, variant: string) => {
@@ -77,6 +83,27 @@ const renderSheetToCanvas = async (
       td.style.position = 'relative';
       td.style.verticalAlign = 'middle';
       td.style.textAlign = 'center';
+      td.style.boxSizing = 'border-box';
+      td.style.whiteSpace = 'pre-wrap';
+      td.style.overflow = 'hidden';
+
+      // 엑셀 셀 스타일을 최대한 HTML에 반영하여 PDF/PNG에서도 시각 일관성 유지
+      if (cell.style?.font) {
+        if (cell.style.font.name) td.style.fontFamily = cell.style.font.name;
+        if (cell.style.font.size) td.style.fontSize = `${cell.style.font.size}px`;
+        if (cell.style.font.bold) td.style.fontWeight = '700';
+        if (cell.style.font.italic) td.style.fontStyle = 'italic';
+      }
+      if (cell.style?.alignment) {
+        const horizontal = cell.style.alignment.horizontal;
+        const vertical = cell.style.alignment.vertical;
+        if (horizontal === 'left' || horizontal === 'center' || horizontal === 'right' || horizontal === 'justify') {
+          td.style.textAlign = horizontal;
+        }
+        if (vertical === 'top' || vertical === 'middle' || vertical === 'bottom') {
+          td.style.verticalAlign = vertical;
+        }
+      }
 
       // 셀 병합 처리
       if (cell.isMerged) {
@@ -132,7 +159,7 @@ const renderSheetToCanvas = async (
       
       if (assignment) {
         const sigFile = findSigFile(assignment.signatureBaseName, assignment.signatureVariantId);
-        if (sigFile) {
+        if (sigFile && sigFile.previewUrl && sigFile.width > 0 && sigFile.height > 0) {
           // placeholder 텍스트 유지 후 서명 이미지 오버레이
           td.style.position = 'relative';
           if (displayValue) {
@@ -153,6 +180,9 @@ const renderSheetToCanvas = async (
           img.style.zIndex = '1';
           img.style.transform = `translateX(-50%) rotate(${assignment.rotation}deg) scale(${assignment.scale})`;
           td.appendChild(img);
+        } else if (displayValue) {
+          // 방어적 코드: 손상된 서명 파일이면 프로세스를 중단하지 않고 텍스트만 유지
+          td.textContent = displayValue;
         }
       } else if (displayValue && !isSignaturePlaceholder(displayValue)) {
         // 일반 텍스트 표시 (placeholder가 아닌 경우)
@@ -170,9 +200,19 @@ const renderSheetToCanvas = async (
     // html2canvas로 렌더링
     const canvas = await html2canvas(container, {
       backgroundColor: '#ffffff',
-      scale: 2, // 고해상도
+      scale: 2, // 요청사항 반영: PDF/PNG 기본 고해상도 렌더링
       logging: false,
       useCORS: true,
+      allowTaint: false,
+      removeContainer: true,
+      foreignObjectRendering: false,
+      imageTimeout: 15000,
+      onclone: (clonedDocument) => {
+        // 복제 DOM에서도 폰트/테두리 렌더 안정성을 유지하기 위한 스타일 보강
+        const clonedBody = clonedDocument.body;
+        clonedBody.style.textRendering = 'geometricPrecision';
+        clonedBody.style.webkitFontSmoothing = 'antialiased';
+      },
     });
 
     return canvas;
@@ -199,6 +239,8 @@ export const exportToPNG = async (
   return new Promise((resolve, reject) => {
     canvas.toBlob((blob) => {
       if (!blob) {
+        canvas.width = 1;
+        canvas.height = 1;
         reject(new Error('이미지 생성 실패'));
         return;
       }
@@ -211,6 +253,9 @@ export const exportToPNG = async (
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+      // 메모리 최적화: 다운로드 직후 canvas 버퍼 참조 해제
+      canvas.width = 1;
+      canvas.height = 1;
 
       console.log(`[PNG 내보내기] 완료: ${filename}`);
       resolve();
@@ -245,7 +290,7 @@ export const exportToPDF = async (
     format: 'a4'
   });
 
-  const imgData = canvas.toDataURL('image/png');
+  let imgData = canvas.toDataURL('image/png');
   
   // 이미지를 PDF에 추가 (여러 페이지가 필요한 경우 처리)
   if (imgHeight > A4_HEIGHT_MM) {
@@ -267,5 +312,9 @@ export const exportToPDF = async (
   }
 
   pdf.save(filename);
+  // 메모리 최적화: 대용량 문자열/캔버스 버퍼 즉시 해제
+  imgData = '';
+  canvas.width = 1;
+  canvas.height = 1;
   console.log(`[PDF 내보내기] 완료: ${filename}`);
 };

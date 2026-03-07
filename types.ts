@@ -31,7 +31,7 @@ export interface SignatureAssignment {
   signatureBaseName: string; // "HongGilDong"
   signatureVariantId: string; // Specific file ID used
   rotation: number; // Degrees -5 to 5
-  scale: number; // Percentage 0.95 to 1.05
+  scale: number; // Percentage 1.15 to 1.35
   offsetX: number; // Pixels
   offsetY: number; // Pixels
 }
