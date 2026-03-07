@@ -2,6 +2,15 @@ import ExcelJS from 'exceljs';
 import { SheetData, RowData, CellData, SignatureFile, SignatureAssignment } from '../types';
 import { columnNumberToLetter, parseCellAddress, isSignaturePlaceholder, randomInt, randomFloat, parsePrintAreaBounds } from './excelUtils';
 
+export interface AutoMatchOptions {
+  /**
+   * 서명 변형 강도 (0~100)
+   * - 0에 가까울수록 회전/이동/스케일 편차가 줄어들고
+   * - 100에 가까울수록 더 자연스럽고 랜덤한 변형을 적용한다.
+   */
+  variationStrength?: number;
+}
+
 /**
  * 매칭을 위해 이름 정규화
  */
@@ -241,9 +250,22 @@ export const parseExcelFile = async (buffer: ArrayBuffer): Promise<SheetData> =>
  */
 export const autoMatchSignatures = (
   sheetData: SheetData,
-  signatures: Map<string, SignatureFile[]>
+  signatures: Map<string, SignatureFile[]>,
+  options: AutoMatchOptions = {}
 ): Map<string, SignatureAssignment> => {
   const assignments = new Map<string, SignatureAssignment>();
+
+  const normalizedStrength = Math.max(0, Math.min(100, options.variationStrength ?? 70));
+  const strengthFactor = normalizedStrength / 100;
+
+  // 기본 스케일 요구사항(1.15~1.35)은 유지하되, 강도에 따라 분산 폭을 조절한다.
+  const minScale = 1.15 + (1 - strengthFactor) * 0.05;
+  const maxScale = 1.35 - (1 - strengthFactor) * 0.05;
+
+  // 회전/오프셋도 강도에 비례해 범위를 조절한다.
+  const rotationLimit = Math.max(1, Math.round(2 + strengthFactor * 3));
+  const offsetXLimit = Math.max(1, Math.round(2 + strengthFactor * 2));
+  const offsetYLimit = Math.max(1, Math.round(1 + strengthFactor * 2));
   
   if (!sheetData || sheetData.rows.length === 0) {
     console.warn("시트 데이터가 없습니다.");
@@ -374,11 +396,10 @@ export const autoMatchSignatures = (
           
           // Random offset calculations for natural variation
           // Using helper function for cleaner code and consistent ranges
-          const rotation = randomInt(-5, 5);    // -5 to 5 degrees
-          // 요청사항 반영: 기본 스케일을 1.15 ~ 1.35 범위로 상향
-          const scale = randomFloat(1.15, 1.35);
-          const offsetX = randomInt(-4, 4);     // -4 to +4 px
-          const offsetY = randomInt(-2, 2);     // -2 to +2 px
+          const rotation = randomInt(-rotationLimit, rotationLimit);
+          const scale = randomFloat(minScale, maxScale);
+          const offsetX = randomInt(-offsetXLimit, offsetXLimit);
+          const offsetY = randomInt(-offsetYLimit, offsetYLimit);
 
           assignments.set(key, {
             row: cell.row,

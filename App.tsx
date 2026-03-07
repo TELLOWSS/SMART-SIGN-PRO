@@ -3,6 +3,8 @@ import { Upload, FileSpreadsheet, Image as ImageIcon, CheckCircle, RotateCcw, Do
 import { parseExcelFile, autoMatchSignatures, generateFinalExcel, normalizeName } from './services/excelService';
 import { buildSheetPreviewModel, exportToPDF, exportToPNG, SheetPreviewModel } from './services/alternativeExportService';
 import { AppState, SignatureFile, SheetData, SignatureAssignment } from './types';
+import SignatureWorkspace from './components/SignatureWorkspace';
+import { buildBatchExcelZip, BatchExportProgress } from './services/batchExportService';
 
 // Factory function to ensure fresh state on reset
 const getInitialState = (): AppState => ({
@@ -19,11 +21,15 @@ export default function App() {
   const [processing, setProcessing] = useState(false);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewModel, setPreviewModel] = useState<SheetPreviewModel | null>(null);
+  const [variationStrength, setVariationStrength] = useState(70);
+  const [batchCount, setBatchCount] = useState(5);
+  const [batchProgress, setBatchProgress] = useState<BatchExportProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showGuide, setShowGuide] = useState(false);
   const [toast, setToast] = useState<{msg: string, type: 'success' | 'info'} | null>(null);
   const [exportFormat, setExportFormat] = useState<'excel' | 'pdf' | 'png'>('excel');
   const signaturesRef = useRef<Map<string, SignatureFile[]>>(new Map());
+  const batchAbortRef = useRef<AbortController | null>(null);
   
   // Refs to clear file inputs
   const excelInputRef = useRef<HTMLInputElement>(null);
@@ -301,7 +307,7 @@ export default function App() {
           setProcessing(false);
           return;
         }
-        const assignments = autoMatchSignatures(state.sheetData, state.signatures);
+        const assignments = autoMatchSignatures(state.sheetData, state.signatures, { variationStrength });
         setState(prev => ({ ...prev, assignments, step: 'preview' }));
         setProcessing(false);
         
@@ -338,7 +344,7 @@ export default function App() {
     try {
       let assignmentsToUse = state.assignments;
       if (isRetry && state.sheetData) {
-        assignmentsToUse = autoMatchSignatures(state.sheetData, state.signatures);
+        assignmentsToUse = autoMatchSignatures(state.sheetData, state.signatures, { variationStrength });
         setState(prev => ({ ...prev, assignments: assignmentsToUse }));
       }
 
@@ -449,6 +455,79 @@ export default function App() {
     }
   };
 
+  /**
+   * 다중 무작위 버전 일괄 생성 + ZIP 1회 다운로드
+   * - 브라우저 다중 다운로드 차단을 피하기 위해 JSZip으로 단일 파일화
+   * - 각 회차마다 autoMatchSignatures를 다시 호출해 완전 독립 랜덤 결과를 생성
+   */
+  const handleBatchZipExport = async () => {
+    if (!state.excelBuffer || !state.sheetData || !state.excelFile) {
+      setError('엑셀 파일이 준비되지 않았습니다.');
+      return;
+    }
+
+    if (state.signatures.size === 0) {
+      setError('서명 이미지가 없습니다.');
+      return;
+    }
+
+    const total = Math.max(1, Math.min(50, batchCount));
+    const abortController = new AbortController();
+    batchAbortRef.current = abortController;
+
+    setProcessing(true);
+    setBatchProgress({ current: 0, total, phase: 'generate', percent: 0 });
+    setError(null);
+
+    try {
+      const zipBlob = await buildBatchExcelZip({
+        originalBuffer: state.excelBuffer,
+        sheetData: state.sheetData,
+        signatures: state.signatures,
+        sourceFileName: state.excelFile.name,
+        count: total,
+        variationStrength,
+        onProgress: setBatchProgress,
+        signal: abortController.signal,
+      });
+
+      const zipUrl = URL.createObjectURL(zipBlob);
+      const link = document.createElement('a');
+      link.href = zipUrl;
+      link.download = `서명완료_${state.excelFile.name.replace(/\.xlsx$/i, '')}_${total}부.zip`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(zipUrl);
+
+      setBatchProgress({ current: total, total, phase: 'done', percent: 100 });
+      setToast({ msg: `✅ ${total}개 파일을 ZIP으로 생성했습니다.`, type: 'success' });
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        setToast({ msg: '⏹️ 일괄 생성 작업이 취소되었습니다.', type: 'info' });
+        setBatchProgress(null);
+        return;
+      }
+
+      const msg = err instanceof Error ? err.message : '알 수 없는 오류';
+      console.error('Batch ZIP export error:', err);
+      setError(`일괄 생성 중 오류가 발생했습니다: ${msg}`);
+    } finally {
+      batchAbortRef.current = null;
+      setTimeout(() => setBatchProgress(null), 700);
+      setProcessing(false);
+    }
+  };
+
+  /**
+   * 현재 진행 중인 배치 작업을 즉시 중단
+   */
+  const handleCancelBatchExport = () => {
+    if (batchAbortRef.current) {
+      batchAbortRef.current.abort();
+    }
+  };
+
   const cleanupBlobUrls = (signatures: Map<string, SignatureFile[]>) => {
     signatures.forEach(list => {
       list.forEach(s => {
@@ -465,9 +544,13 @@ export default function App() {
     if (window.confirm("정말로 처음부터 다시 시작하시겠습니까?\n모든 데이터가 초기화됩니다.")) {
       // Cleanup existing blob URLs
       cleanupBlobUrls(state.signatures);
+      if (batchAbortRef.current) {
+        batchAbortRef.current.abort();
+      }
       
       setState(getInitialState());
       setPreviewModel(null);
+      setBatchProgress(null);
       setError(null);
       setToast({ msg: '초기화되었습니다.', type: 'info' });
     }
@@ -565,139 +648,25 @@ export default function App() {
     if (!state.sheetData) return null;
 
     return (
-      <div className="flex flex-col h-[calc(100vh-100px)]">
-        {/* Toolbar */}
-        <div className="bg-white p-4 shadow-sm border-b flex justify-between items-center z-10 flex-wrap gap-3">
-          <div className="flex items-center gap-4 flex-wrap">
-            <h2 className="text-lg sm:text-xl font-bold text-gray-800">미리보기 및 편집</h2>
-            <span className="bg-blue-100 text-blue-800 text-xs px-3 py-1 rounded-full font-medium">
-              {state.assignments.size}개 배치 / {state.sheetData.rows.length}행
-            </span>
-          </div>
-          <div className="flex gap-2 flex-wrap">
-             <button onClick={runAutoMatch} className="px-3 py-2 text-xs sm:text-sm text-gray-600 hover:bg-gray-100 rounded-lg flex items-center gap-1 whitespace-nowrap">
-              <RefreshCw size={16} /> 재설정
-            </button>
-            <button onClick={handleReset} className="px-3 py-2 text-xs sm:text-sm text-red-600 hover:bg-red-50 rounded-lg flex items-center gap-1 whitespace-nowrap">
-              <RotateCcw size={16} /> 초기화
-            </button>
-            
-            {/* Export Format Selection */}
-            <div className="flex items-center gap-2 border border-gray-300 rounded-lg p-1 bg-gray-50">
-              <button
-                onClick={() => setExportFormat('excel')}
-                className={`px-3 py-1 text-xs sm:text-sm rounded flex items-center gap-1 whitespace-nowrap ${
-                  exportFormat === 'excel' ? 'bg-blue-600 text-white font-semibold' : 'text-gray-600 hover:bg-gray-200'
-                }`}
-              >
-                <FileSpreadsheet size={14} /> Excel
-              </button>
-              <button
-                onClick={() => setExportFormat('pdf')}
-                className={`px-3 py-1 text-xs sm:text-sm rounded flex items-center gap-1 whitespace-nowrap ${
-                  exportFormat === 'pdf' ? 'bg-red-600 text-white font-semibold' : 'text-gray-600 hover:bg-gray-200'
-                }`}
-              >
-                <FileText size={14} /> PDF
-              </button>
-              <button
-                onClick={() => setExportFormat('png')}
-                className={`px-3 py-1 text-xs sm:text-sm rounded flex items-center gap-1 whitespace-nowrap ${
-                  exportFormat === 'png' ? 'bg-purple-600 text-white font-semibold' : 'text-gray-600 hover:bg-gray-200'
-                }`}
-              >
-                <ImageIcon size={14} /> PNG
-              </button>
-            </div>
-            
-            <button 
-              onClick={() => handleExport(false)}
-              disabled={processing}
-              className="bg-green-600 text-white px-4 py-2 text-xs sm:text-sm rounded-lg font-semibold hover:bg-green-700 flex items-center gap-1 shadow-md disabled:opacity-50 whitespace-nowrap"
-            >
-              {processing ? <RefreshCw className="animate-spin" size={16} /> : <Download size={16} />}
-              다운로드 ({exportFormat.toUpperCase()})
-            </button>
-          </div>
-        </div>
-
-        {/* 실시간 프리뷰: alternativeExportService 공용 모델 기반 */}
-        <div className="flex-1 overflow-auto bg-gray-100 p-2 sm:p-8 custom-scrollbar relative">
-          <div className="bg-white shadow-xl rounded-sm overflow-hidden inline-block min-w-full">
-            {previewLoading && (
-              <div className="p-10 text-center text-gray-500 text-sm">
-                미리보기 렌더링 중입니다...
-              </div>
-            )}
-
-            {!previewLoading && previewModel && (
-              <table className="border-collapse w-full table-auto">
-                <tbody>
-                  {previewModel.rows.map((row) => (
-                    <tr key={`preview-row-${row.row}`} className="border-b border-gray-200 hover:bg-gray-50/40">
-                      {row.cells.map((cell) => {
-                        if (cell.hidden) return null;
-
-                        return (
-                          <td
-                            key={cell.key}
-                            rowSpan={cell.rowSpan}
-                            colSpan={cell.colSpan}
-                            className="border-r border-gray-200 px-2 py-1 text-xs sm:text-sm relative min-w-[60px] sm:min-w-[80px]"
-                            style={{
-                              fontFamily: cell.style.fontFamily,
-                              fontSize: cell.style.fontSize,
-                              fontWeight: cell.style.fontWeight,
-                              fontStyle: cell.style.fontStyle,
-                              textAlign: cell.style.textAlign,
-                              verticalAlign: cell.style.verticalAlign,
-                            }}
-                            title={`R${cell.row}C${cell.col}`}
-                          >
-                            <div className="relative w-full h-full min-h-[40px] sm:min-h-[30px] flex items-center justify-center">
-                              <span className="z-0 text-gray-700 select-none whitespace-pre-wrap break-words">
-                                {cell.text}
-                              </span>
-
-                              {cell.signature && (
-                                <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
-                                  <img
-                                    src={cell.signature.src}
-                                    alt="signature-preview"
-                                    className="drop-shadow-sm mix-blend-multiply"
-                                    style={{
-                                      transform: cell.signature.transform,
-                                      opacity: cell.signature.opacity,
-                                      maxWidth: '130%',
-                                      maxHeight: '130%',
-                                      objectFit: 'contain',
-                                    }}
-                                  />
-                                </div>
-                              )}
-                            </div>
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
-
-            {!previewLoading && !previewModel && (
-              <div className="p-10 text-center text-gray-500 text-sm">
-                미리보기를 생성할 수 없습니다.
-              </div>
-            )}
-          </div>
-          {previewModel && (
-            <p className="text-xs text-gray-500 mt-2 text-center">
-              인쇄영역 기준 프리뷰: 행 {previewModel.printAreaRows.start}~{previewModel.printAreaRows.end}, 열 {previewModel.printAreaCols.start}~{previewModel.printAreaCols.end}
-            </p>
-          )}
-        </div>
-      </div>
+      <SignatureWorkspace
+        previewLoading={previewLoading}
+        previewModel={previewModel}
+        processing={processing}
+        exportFormat={exportFormat}
+        variationStrength={variationStrength}
+        batchCount={batchCount}
+        batchProgress={batchProgress}
+        onVariationStrengthChange={setVariationStrength}
+        onBatchCountChange={(value) => setBatchCount(Math.max(1, Math.min(50, value || 1)))}
+        onExportFormatChange={setExportFormat}
+        onAutoMatch={runAutoMatch}
+        onSingleExport={() => handleExport(false)}
+        onBatchZipExport={handleBatchZipExport}
+        onCancelBatchExport={handleCancelBatchExport}
+        isBatchCancelable={!!batchAbortRef.current && processing}
+        assignmentCount={state.assignments.size}
+        rowCount={state.sheetData.rows.length}
+      />
     );
   };
 
