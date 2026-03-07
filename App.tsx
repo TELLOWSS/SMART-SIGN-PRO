@@ -30,6 +30,7 @@ export default function App() {
   const [exportFormat, setExportFormat] = useState<'excel' | 'pdf' | 'png'>('excel');
   const signaturesRef = useRef<Map<string, SignatureFile[]>>(new Map());
   const batchAbortRef = useRef<AbortController | null>(null);
+  const objectUrlRegistryRef = useRef<Set<string>>(new Set());
   
   // Refs to clear file inputs
   const excelInputRef = useRef<HTMLInputElement>(null);
@@ -47,9 +48,48 @@ export default function App() {
     signaturesRef.current = state.signatures;
   }, [state.signatures]);
 
+  /**
+   * 생성된 Object URL을 추적 등록
+   * - Start Over 시점에 일괄 해제하여 메모리 누수를 방지한다.
+   */
+  const trackObjectUrl = (url: string) => {
+    if (!url) return;
+    objectUrlRegistryRef.current.add(url);
+  };
+
+  /**
+   * 특정 Object URL 해제 + 추적 목록 제거
+   */
+  const revokeTrackedObjectUrl = (url: string) => {
+    if (!url) return;
+    try {
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.warn('Failed to revoke object URL:', e);
+    } finally {
+      objectUrlRegistryRef.current.delete(url);
+    }
+  };
+
+  /**
+   * 추적된 Object URL 전체 해제
+   * - 다운로드 Blob URL, 미리보기용 시그니처 URL 등 이전 작업 잔존 리소스를 모두 정리
+   */
+  const revokeAllTrackedObjectUrls = () => {
+    for (const url of objectUrlRegistryRef.current) {
+      try {
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        console.warn('Failed to revoke object URL:', e);
+      }
+    }
+    objectUrlRegistryRef.current.clear();
+  };
+
   useEffect(() => {
     return () => {
       cleanupBlobUrls(signaturesRef.current);
+      revokeAllTrackedObjectUrls();
     };
   }, []);
 
@@ -247,6 +287,7 @@ export default function App() {
 
         // 실제 앱에서 표시/내보내기에 사용하는 URL만 유지
         objectUrl = URL.createObjectURL(file);
+        trackObjectUrl(objectUrl);
         
         const sigFile: SignatureFile = {
           name: baseName,
@@ -263,7 +304,7 @@ export default function App() {
           count++;
         } else {
           if (objectUrl) {
-            URL.revokeObjectURL(objectUrl);
+            revokeTrackedObjectUrl(objectUrl);
             objectUrl = null;
           }
           failedFiles.push(`${file.name} (중복)`);
@@ -271,7 +312,7 @@ export default function App() {
       } catch (err) {
         console.error('Image upload error:', err);
         if (objectUrl) {
-          URL.revokeObjectURL(objectUrl);
+          revokeTrackedObjectUrl(objectUrl);
           objectUrl = null;
         }
         failedFiles.push(`${file.name} (처리 실패)`);
@@ -413,6 +454,7 @@ export default function App() {
         console.log(`ZIP 형식 검증: ${isZip ? '✓ 정상' : '✗ 비정상'}`);
 
         const url = URL.createObjectURL(blob);
+        trackObjectUrl(url);
         console.log(`Object URL 생성: ${url.substring(0, 50)}...`);
         
         const a = document.createElement('a');
@@ -429,7 +471,7 @@ export default function App() {
         console.log(`========== [완료] ==========\n`);
         
         setTimeout(() => {
-          URL.revokeObjectURL(url);
+          revokeTrackedObjectUrl(url);
           console.log(`메모리 정리: Object URL 해제`);
         }, 100);
         
@@ -492,13 +534,14 @@ export default function App() {
       });
 
       const zipUrl = URL.createObjectURL(zipBlob);
+      trackObjectUrl(zipUrl);
       const link = document.createElement('a');
       link.href = zipUrl;
       link.download = `서명완료_${state.excelFile.name.replace(/\.xlsx$/i, '')}_${total}부.zip`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-      URL.revokeObjectURL(zipUrl);
+      revokeTrackedObjectUrl(zipUrl);
 
       setBatchProgress({ current: total, total, phase: 'done', percent: 100 });
       setToast({ msg: `✅ ${total}개 파일을 ZIP으로 생성했습니다.`, type: 'success' });
@@ -531,28 +574,47 @@ export default function App() {
   const cleanupBlobUrls = (signatures: Map<string, SignatureFile[]>) => {
     signatures.forEach(list => {
       list.forEach(s => {
-        try {
-          URL.revokeObjectURL(s.previewUrl);
-        } catch (e) {
-          console.warn("Failed to revoke object URL:", e);
-        }
+        revokeTrackedObjectUrl(s.previewUrl);
       });
     });
   };
 
+  /**
+   * Start Over: 완전 초기화 함수
+   *
+   * 동작 순서:
+   * 1) 진행 중인 배치/비동기 작업 중단
+   * 2) 시그니처 및 다운로드에 사용된 Object URL 전부 해제
+   * 3) React 상태를 초기값으로 되돌림(파일/서명/프리뷰/진행률/옵션)
+   * 4) Step 상태를 업로드 화면(첫 단계)으로 복귀
+   */
+  const startOver = () => {
+    if (batchAbortRef.current) {
+      batchAbortRef.current.abort();
+      batchAbortRef.current = null;
+    }
+
+    cleanupBlobUrls(state.signatures);
+    revokeAllTrackedObjectUrls();
+
+    setState(getInitialState());
+    setPreviewModel(null);
+    setPreviewLoading(false);
+    setBatchProgress(null);
+    setProcessing(false);
+    setVariationStrength(70);
+    setBatchCount(5);
+    setExportFormat('excel');
+    setError(null);
+    setToast({ msg: '새 파일 작업을 시작할 수 있도록 초기화되었습니다.', type: 'info' });
+
+    if (excelInputRef.current) excelInputRef.current.value = '';
+    if (sigInputRef.current) sigInputRef.current.value = '';
+  };
+
   const handleReset = () => {
     if (window.confirm("정말로 처음부터 다시 시작하시겠습니까?\n모든 데이터가 초기화됩니다.")) {
-      // Cleanup existing blob URLs
-      cleanupBlobUrls(state.signatures);
-      if (batchAbortRef.current) {
-        batchAbortRef.current.abort();
-      }
-      
-      setState(getInitialState());
-      setPreviewModel(null);
-      setBatchProgress(null);
-      setError(null);
-      setToast({ msg: '초기화되었습니다.', type: 'info' });
+      startOver();
     }
   };
 
@@ -664,6 +726,7 @@ export default function App() {
         onBatchZipExport={handleBatchZipExport}
         onCancelBatchExport={handleCancelBatchExport}
         isBatchCancelable={!!batchAbortRef.current && processing}
+        onStartOver={handleReset}
         assignmentCount={state.assignments.size}
         rowCount={state.sheetData.rows.length}
       />
@@ -695,13 +758,14 @@ export default function App() {
           <Copy size={18} />
           다른 랜덤 버전 즉시 다운로드
         </button>
+        <button
+          onClick={handleReset}
+          className="bg-white border border-slate-300 text-slate-700 px-6 py-3 rounded-xl font-medium hover:bg-slate-50 flex items-center gap-2"
+        >
+          <RotateCcw size={18} />
+          처음으로 돌아가기
+        </button>
       </div>
-      <button 
-        onClick={handleReset}
-        className="text-gray-400 hover:text-gray-600 underline text-sm mt-4"
-      >
-        처음으로 돌아가기 (파일 초기화)
-      </button>
     </div>
   );
 

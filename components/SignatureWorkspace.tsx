@@ -1,5 +1,5 @@
 import React from 'react';
-import { Download, FileSpreadsheet, FileText, Image as ImageIcon, RefreshCw, PackageOpen, SlidersHorizontal } from 'lucide-react';
+import { Download, FileSpreadsheet, FileText, Image as ImageIcon, RefreshCw, PackageOpen, SlidersHorizontal, House } from 'lucide-react';
 import { SheetPreviewModel } from '../services/alternativeExportService';
 
 interface BatchProgress {
@@ -27,6 +27,7 @@ interface SignatureWorkspaceProps {
   onBatchZipExport: () => void;
   onCancelBatchExport: () => void;
   isBatchCancelable: boolean;
+  onStartOver: () => void;
   assignmentCount: number;
   rowCount: number;
 }
@@ -53,6 +54,7 @@ export default function SignatureWorkspace(props: SignatureWorkspaceProps) {
     onBatchZipExport,
     onCancelBatchExport,
     isBatchCancelable,
+    onStartOver,
     assignmentCount,
     rowCount,
   } = props;
@@ -139,6 +141,13 @@ export default function SignatureWorkspace(props: SignatureWorkspaceProps) {
             <Download size={14} /> 단일 저장
           </button>
         </div>
+
+        <button
+          onClick={onStartOver}
+          className="w-full px-4 py-2.5 rounded-xl border border-slate-300 text-slate-700 bg-white hover:bg-slate-50 font-medium flex items-center justify-center gap-2"
+        >
+          <House size={15} /> 처음으로 돌아가기
+        </button>
 
         <button
           onClick={onBatchZipExport}

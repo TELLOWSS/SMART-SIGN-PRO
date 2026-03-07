@@ -477,6 +477,41 @@ const normalizeMergeRange = (range: string): string => {
 };
 
 /**
+ * 병합 범위 중복 제거 유틸
+ *
+ * 왜 필요한가?
+ * - ExcelJS 처리 과정(병합 해제/재병합/이미지 추가)에서 model.merges에
+ *   동일 범위가 중복 삽입되면, 저장된 XLSX 내부 mergeCells XML의 count/entry가
+ *   불일치해져 Excel에서 "파일에 문제가 있어 복구" 팝업이 발생할 수 있다.
+ * - 따라서 저장 직전 반드시 유니크한 병합 범위만 유지한다.
+ */
+const getUniqueMergeRanges = (ranges: string[]): string[] => {
+  const uniqueMap = new Map<string, string>();
+
+  for (const range of ranges) {
+    if (!range || typeof range !== 'string') continue;
+    const normalized = normalizeMergeRange(range);
+    if (!normalized) continue;
+    if (!uniqueMap.has(normalized)) {
+      uniqueMap.set(normalized, range);
+    }
+  }
+
+  return Array.from(uniqueMap.values());
+};
+
+/**
+ * 병합 범위 진단 정보 계산
+ * - Excel 복구 팝업의 주요 원인인 중복 병합 범위를 빠르게 식별하기 위한 디버그 헬퍼
+ */
+const getMergeDiagnostics = (ranges: string[]) => {
+  const total = ranges.length;
+  const unique = getUniqueMergeRanges(ranges).length;
+  const duplicates = Math.max(0, total - unique);
+  return { total, unique, duplicates };
+};
+
+/**
  * 병합 범위를 안정적으로 재적용하기 위한 파서
  * - 잘못된 범위 문자열은 무시하여 내보내기 중단을 방지한다.
  */
@@ -501,7 +536,8 @@ const parseMergeRange = (range: string): { startRow: number; endRow: number; sta
  * - 3차: 최종 검증으로 원본 병합 집합과 완전 일치 여부 확인
  */
 const enforceMergedCellsIntegrity = (worksheet: ExcelJS.Worksheet, originalMergedCells: string[]) => {
-  const normalizedOriginal = originalMergedCells.map(normalizeMergeRange);
+  const uniqueOriginalMergedCells = getUniqueMergeRanges(originalMergedCells);
+  const normalizedOriginal = uniqueOriginalMergedCells.map(normalizeMergeRange);
 
   const getCurrentMergeSet = () => {
     const current = (worksheet.model.merges || []) as string[];
@@ -510,7 +546,7 @@ const enforceMergedCellsIntegrity = (worksheet: ExcelJS.Worksheet, originalMerge
 
   // 1차: 누락 병합만 재적용
   let currentSet = getCurrentMergeSet();
-  for (const mergeRange of originalMergedCells) {
+  for (const mergeRange of uniqueOriginalMergedCells) {
     const normalized = normalizeMergeRange(mergeRange);
     if (!currentSet.has(normalized)) {
       try {
@@ -551,7 +587,7 @@ const enforceMergedCellsIntegrity = (worksheet: ExcelJS.Worksheet, originalMerge
     }
   }
 
-  for (const mergeRange of originalMergedCells) {
+  for (const mergeRange of uniqueOriginalMergedCells) {
     try {
       worksheet.mergeCells(mergeRange);
     } catch (mergeErr) {
@@ -568,10 +604,13 @@ const enforceMergedCellsIntegrity = (worksheet: ExcelJS.Worksheet, originalMerge
 
   if (!finalMatched) {
     console.warn('[병합셀 방어] 2차 검증 불일치 - model.merges 강제 동기화 수행');
-    worksheet.model.merges = [...originalMergedCells];
+    worksheet.model.merges = getUniqueMergeRanges(uniqueOriginalMergedCells);
   } else {
     console.log('[병합셀 방어] 2차 검증 성공 - 원본 병합 완전 복원');
   }
+
+  // 최종 방어: 현재 model.merges 자체도 중복 제거 후 확정
+  worksheet.model.merges = getUniqueMergeRanges((worksheet.model.merges || []) as string[]);
 };
 
 const validateWorksheetPreservation = (
@@ -634,8 +673,10 @@ export const generateFinalExcel = async (
   console.log(`[로드완료] 행: ${worksheet.actualRowCount}, 열: ${worksheet.actualColumnCount}, 워크시트 수: ${workbook.worksheets.length}`);
 
   // 병합된 셀 정보 읽기 (읽기만 - 조작 금지!)
-  const originalMergedCells = worksheet.model.merges ? [...worksheet.model.merges] : [];
+  const originalMergedCells = worksheet.model.merges ? getUniqueMergeRanges([...worksheet.model.merges]) : [];
   console.log(`[병합셀] 원본 병합된 셀: ${originalMergedCells.length}개 (읽기만, 조작 금지)`);
+  const originalMergeDiag = getMergeDiagnostics((worksheet.model.merges || []) as string[]);
+  console.log(`[병합셀진단] 원본 total=${originalMergeDiag.total}, unique=${originalMergeDiag.unique}, duplicates=${originalMergeDiag.duplicates}`);
   for (const merge of originalMergedCells) {
     console.log(`  - ${merge}`);
   }
@@ -670,6 +711,7 @@ export const generateFinalExcel = async (
   let processedCount = 0;
   let failureCount = 0;
   let skippedCount = 0;
+  let fallbackAnchorCount = 0;
 
   const findSigFile = (name: string, variant: string) => {
     const list = signaturesMap.get(name);
@@ -938,27 +980,60 @@ export const generateFinalExcel = async (
           const baseOffsetX = clampedOffsetX;
           const baseOffsetY = clampedOffsetY;
 
+          // Excel 내부 Drawing XML 안정성을 위해 오프셋은 반드시 정수로 강제
           const emuColOff = Math.max(0, Math.round(baseOffsetX * EMU_PER_PIXEL));
           const emuRowOff = Math.max(0, Math.round(baseOffsetY * EMU_PER_PIXEL));
+          const integerTargetCol = Math.round(targetCol);
+          const integerTargetRow = Math.round(targetRow);
+          const integerWidth = Math.max(1, Math.round(intWidth));
+          const integerHeight = Math.max(1, Math.round(intHeight));
+
+          // 치명 버그 원인 주석:
+          // - placeholder가 한 행에 다수(예: 11개 연속)일 때 이미지 anchor가 빽빽하게 생성된다.
+          // - 이때 editAs가 명시되지 않거나 좌표/크기 값이 부동소수로 흔들리면
+          //   Excel이 drawing anchor를 복구 대상으로 인식해 "파일 복구" 팝업이 뜰 수 있다.
+          // - 따라서 editAs를 명시적으로 강제하고, 모든 anchor 좌표/크기를 정수화한다.
+          // - 또한 oneCell 실패 시 absolute로 폴백해 손상 가능성을 추가로 낮춘다.
+          const PRIMARY_IMAGE_EDIT_AS: 'oneCell' | 'absolute' = 'oneCell';
+          const FALLBACK_IMAGE_EDIT_AS: 'oneCell' | 'absolute' = 'absolute';
 
           // 안전한 이미지 배치
           try {
             worksheet.addImage(imageId, {
               tl: {
-                col: targetCol,
-                row: targetRow,
+                col: integerTargetCol,
+                row: integerTargetRow,
                 nativeColOff: emuColOff,
                 nativeRowOff: emuRowOff
               },
-              ext: { width: intWidth, height: intHeight },
-              editAs: 'oneCell',
+              ext: { width: integerWidth, height: integerHeight },
+              editAs: PRIMARY_IMAGE_EDIT_AS,
             });
 
             processedCount++;
             console.log(`  ✓ 배치됨: (${assignment.row},${assignment.col}) ID:${imageId}`);
           } catch (posErr) {
-            console.error(`  ✗ addImage 배치 실패 (${assignment.row}, ${assignment.col}):`, posErr);
-            failureCount++;
+            console.warn(`  ⚠ oneCell 배치 실패, absolute 폴백 시도 (${assignment.row}, ${assignment.col})`, posErr);
+
+            try {
+              worksheet.addImage(imageId, {
+                tl: {
+                  col: integerTargetCol,
+                  row: integerTargetRow,
+                  nativeColOff: emuColOff,
+                  nativeRowOff: emuRowOff
+                },
+                ext: { width: integerWidth, height: integerHeight },
+                editAs: FALLBACK_IMAGE_EDIT_AS,
+              });
+
+              processedCount++;
+              fallbackAnchorCount++;
+              console.log(`  ✓ absolute 폴백 배치 성공: (${assignment.row},${assignment.col}) ID:${imageId}`);
+            } catch (fallbackErr) {
+              console.error(`  ✗ addImage 폴백 배치 실패 (${assignment.row}, ${assignment.col}):`, fallbackErr);
+              failureCount++;
+            }
           }
         } catch (calcErr) {
           console.error(`  ✗ 계산 오류:`, calcErr);
@@ -978,6 +1053,7 @@ export const generateFinalExcel = async (
   console.log(`  성공: ${processedCount}개`);
   console.log(`  실패: ${failureCount}개`);
   console.log(`  스킵: ${skippedCount}개`);
+  console.log(`  앵커 폴백(absolute): ${fallbackAnchorCount}개`);
   console.log(`  캐시됨: ${assignmentValues.length - processedCount - failureCount - skippedCount}개`);
   // 메모리 최적화: 워크북 내 이미지 ID 캐시는 이후 재사용하지 않으므로 즉시 해제
   imageCache.clear();
@@ -997,6 +1073,14 @@ export const generateFinalExcel = async (
   const finalMergedCells = worksheet.model.merges ? [...worksheet.model.merges] : [];
   const finalPrintArea = worksheet.pageSetup?.printArea;
   validateWorksheetPreservation(originalMergedCells, finalMergedCells, originalPrintArea, finalPrintArea);
+
+  const finalMergeDiag = getMergeDiagnostics(finalMergedCells);
+  console.log(`[병합셀진단] 복원후 total=${finalMergeDiag.total}, unique=${finalMergeDiag.unique}, duplicates=${finalMergeDiag.duplicates}`);
+
+  // 저장 직전 최종 방어: 중복 병합 범위를 제거해 mergeCells XML 무결성을 보장
+  worksheet.model.merges = getUniqueMergeRanges((worksheet.model.merges || []) as string[]);
+  const dedupedMergeDiag = getMergeDiagnostics((worksheet.model.merges || []) as string[]);
+  console.log(`[병합셀진단] 저장직전 total=${dedupedMergeDiag.total}, unique=${dedupedMergeDiag.unique}, duplicates=${dedupedMergeDiag.duplicates}`);
   
   // Step 3.5: 인쇄영역 외부의 행/열 제거 (엑셀 파일 크기 및 구조 최적화)
   if (originalPrintArea) {
