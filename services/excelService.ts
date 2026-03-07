@@ -1,6 +1,6 @@
 import ExcelJS from 'exceljs';
 import { SheetData, RowData, CellData, SignatureFile, SignatureAssignment } from '../types';
-import { columnLetterToNumber, columnNumberToLetter, parseCellAddress, SIGNATURE_PLACEHOLDERS, isSignaturePlaceholder, randomInt } from './excelUtils';
+import { columnNumberToLetter, parseCellAddress, isSignaturePlaceholder, randomInt, parsePrintAreaBounds } from './excelUtils';
 
 /**
  * 매칭을 위해 이름 정규화
@@ -360,14 +360,6 @@ export const autoMatchSignatures = (
 };
 
 /**
- * 인쇄영역 범위가 유효한지 검증
- */
-const isValidPrintAreaRange = (tlRow: number, brRow: number, tlCol: number, brCol: number): boolean => {
-  return tlRow > 0 && brRow > 0 && tlCol > 0 && brCol > 0 && 
-         tlRow <= brRow && tlCol <= brCol;
-};
-
-/**
  * 셀이 병합된 셀 범위 내에 있는지 확인
  * @param row 행 번호 (1-based)
  * @param col 열 번호 (1-based)
@@ -415,6 +407,32 @@ const isTopLeftOfMergedCell = (row: number, col: number, mergedCells: string[]):
     }
   }
   return false;
+};
+
+const normalizeMergeRange = (range: string): string => {
+  return range.toUpperCase().replace(/[\s$]/g, '');
+};
+
+const validateWorksheetPreservation = (
+  originalMergedCells: string[],
+  finalMergedCells: string[],
+  originalPrintArea: string | undefined,
+  finalPrintArea: string | undefined
+) => {
+  console.log(`[최종확인] 병합된 셀: ${finalMergedCells.length}개 (원본: ${originalMergedCells.length}개)`);
+  console.log(`[최종확인] 인쇄영역: ${finalPrintArea || '설정 안 됨'} (원본: ${originalPrintArea || '설정 안 됨'})`);
+
+  if (originalMergedCells.length !== finalMergedCells.length) {
+    console.warn(`⚠️ 경고: 병합된 셀 수가 여전히 다릅니다! (원본: ${originalMergedCells.length}, 최종: ${finalMergedCells.length})`);
+  } else if (originalMergedCells.length > 0) {
+    console.log(`✅ 병합된 셀이 성공적으로 보존되었습니다!`);
+  }
+
+  if (originalPrintArea !== finalPrintArea) {
+    console.warn(`⚠️ 경고: 인쇄영역이 변경되었습니다! (원본: ${originalPrintArea || '없음'}, 최종: ${finalPrintArea || '없음'})`);
+  } else if (originalPrintArea) {
+    console.log(`✅ 인쇄영역이 성공적으로 보존되었습니다!`);
+  }
 };
 
 /**
@@ -471,67 +489,16 @@ export const generateFinalExcel = async (
   }
 
   // 인쇄영역 범위 파싱 (서명 배치 범위 제한용)
-  let printAreaRows = { start: 1, end: worksheet.actualRowCount || 1000 };
-  let printAreaCols = { start: 1, end: worksheet.actualColumnCount || 26 };
-  
+  const printAreaBounds = parsePrintAreaBounds(
+    originalPrintArea,
+    worksheet.actualRowCount || 1000,
+    worksheet.actualColumnCount || 26
+  );
+  const printAreaRows = printAreaBounds.rows;
+  const printAreaCols = printAreaBounds.cols;
+
   if (originalPrintArea) {
-    try {
-      // printArea 형식 처리:
-      // 1. "A1:C10" (단순 범위)
-      // 2. "Sheet1!A1:C10" (시트명 포함)
-      // 3. "$A$1:$C$10" (절대 참조)
-      // 4. "Sheet1!$A$1:$C$10" (시트명 + 절대 참조)
-      let range = originalPrintArea;
-      
-      // 시트명 제거
-      if (range.includes('!')) {
-        range = range.split('!').pop() || range;
-      }
-      
-      // $ 기호 제거 (절대 참조)
-      range = range.replace(/\$/g, '');
-      
-      const parts = range.split(':');
-      if (parts.length === 2) {
-        const [topLeft, bottomRight] = parts;
-        const tlMatch = topLeft.trim().match(/^([A-Z]+)(\d+)$/i);
-        const brMatch = bottomRight.trim().match(/^([A-Z]+)(\d+)$/i);
-        
-        if (tlMatch && brMatch) {
-          const tlCol = columnLetterToNumber(tlMatch[1].toUpperCase());
-          const brCol = columnLetterToNumber(brMatch[1].toUpperCase());
-          const tlRow = parseInt(tlMatch[2], 10);
-          const brRow = parseInt(brMatch[2], 10);
-          
-          // 유효성 검사
-          if (isValidPrintAreaRange(tlRow, brRow, tlCol, brCol)) {
-            printAreaRows = { start: tlRow, end: brRow };
-            printAreaCols = { start: tlCol, end: brCol };
-            console.log(`[인쇄영역파싱성공] 행: ${printAreaRows.start}-${printAreaRows.end}, 열: ${printAreaCols.start}-${printAreaCols.end}`);
-          } else {
-            console.warn(`[인쇄영역파싱실패] 잘못된 범위 값: ${originalPrintArea}`);
-          }
-        } else {
-          console.warn(`[인쇄영역파싱실패] 형식 오류: ${originalPrintArea}`);
-        }
-      } else if (parts.length === 1 && parts[0].trim()) {
-        // 단일 셀인 경우 (예: "A1")
-        const cellMatch = parts[0].trim().match(/^([A-Z]+)(\d+)$/i);
-        if (cellMatch) {
-          const col = columnLetterToNumber(cellMatch[1].toUpperCase());
-          const row = parseInt(cellMatch[2], 10);
-          printAreaRows = { start: row, end: row };
-          printAreaCols = { start: col, end: col };
-          console.log(`[인쇄영역파싱성공] 단일 셀: (${row}, ${col})`);
-        }
-      } else {
-        console.warn(`[인쇄영역파싱실패] 예상치 못한 형식: ${originalPrintArea}`);
-      }
-    } catch (parseErr) {
-      console.error(`[인쇄영역파싱실패] 예외 발생:`, parseErr);
-      // 인쇄영역을 파싱할 수 없을 때는 전체 시트를 사용 (기본값 유지)
-      console.log(`[인쇄영역] 전체 시트 사용 (행: 1-${printAreaRows.end}, 열: 1-${printAreaCols.end})`);
-    }
+    console.log(`[인쇄영역파싱] 행: ${printAreaRows.start}-${printAreaRows.end}, 열: ${printAreaCols.start}-${printAreaCols.end}`);
   } else {
     console.log(`[인쇄영역] 설정되지 않음 - 전체 시트 사용 (행: 1-${printAreaRows.end}, 열: 1-${printAreaCols.end})`);
   }
@@ -735,11 +702,6 @@ export const generateFinalExcel = async (
   const currentMergedCells = worksheet.model.merges ? [...worksheet.model.merges] : [];
   console.log(`[병합셀 복원] 현재 병합된 셀: ${currentMergedCells.length}개 (원본: ${originalMergedCells.length}개)`);
   
-  // 병합 범위 정규화 함수 (대소문자 무시, 공백 제거, $ 기호 제거)
-  const normalizeMergeRange = (range: string): string => {
-    return range.toUpperCase().replace(/[\s$]/g, '');
-  };
-  
   // 병합된 셀이 손실되었다면 다시 적용
   if (originalMergedCells.length > 0) {
     let reappliedCount = 0;
@@ -793,21 +755,7 @@ export const generateFinalExcel = async (
   // 최종 확인: 병합된 셀과 인쇄영역이 여전히 존재하는지 확인
   const finalMergedCells = worksheet.model.merges ? [...worksheet.model.merges] : [];
   const finalPrintArea = worksheet.pageSetup?.printArea;
-  console.log(`[최종확인] 병합된 셀: ${finalMergedCells.length}개 (원본: ${originalMergedCells.length}개)`);
-  console.log(`[최종확인] 인쇄영역: ${finalPrintArea || '설정 안 됨'} (원본: ${originalPrintArea || '설정 안 됨'})`);
-  
-  // 병합된 셀 수나 인쇄영역이 변경된 경우 경고
-  if (originalMergedCells.length !== finalMergedCells.length) {
-    console.warn(`⚠️ 경고: 병합된 셀 수가 여전히 다릅니다! (원본: ${originalMergedCells.length}, 최종: ${finalMergedCells.length})`);
-  } else if (originalMergedCells.length > 0) {
-    console.log(`✅ 병합된 셀이 성공적으로 보존되었습니다!`);
-  }
-  
-  if (originalPrintArea !== finalPrintArea) {
-    console.warn(`⚠️ 경고: 인쇄영역이 변경되었습니다! (원본: ${originalPrintArea || '없음'}, 최종: ${finalPrintArea || '없음'})`);
-  } else if (originalPrintArea) {
-    console.log(`✅ 인쇄영역이 성공적으로 보존되었습니다!`);
-  }
+  validateWorksheetPreservation(originalMergedCells, finalMergedCells, originalPrintArea, finalPrintArea);
   
   // Step 3.5: 인쇄영역 외부의 행/열 제거 (엑셀 파일 크기 및 구조 최적화)
   if (originalPrintArea) {

@@ -2,7 +2,7 @@ import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 import ExcelJS from 'exceljs';
 import { SignatureAssignment, SignatureFile } from '../types';
-import { columnLetterToNumber, isSignaturePlaceholder } from './excelUtils';
+import { columnLetterToNumber, isSignaturePlaceholder, parsePrintAreaBounds } from './excelUtils';
 
 /**
  * 엑셀 시트를 HTML 테이블로 렌더링하여 이미지로 변환하는 헬퍼 함수
@@ -28,33 +28,13 @@ const renderSheetToCanvas = async (
   let printAreaCols = { start: 1, end: worksheet.actualColumnCount || 26 };
 
   if (printAreaOnly && originalPrintArea) {
-    // 인쇄영역 파싱 로직 (excelService.ts와 동일)
-    try {
-      let range = originalPrintArea;
-      if (range.includes('!')) {
-        range = range.split('!').pop() || range;
-      }
-      range = range.replace(/\$/g, '');
-      
-      const parts = range.split(':');
-      if (parts.length === 2) {
-        const [topLeft, bottomRight] = parts;
-        const tlMatch = topLeft.trim().match(/^([A-Z]+)(\d+)$/i);
-        const brMatch = bottomRight.trim().match(/^([A-Z]+)(\d+)$/i);
-        
-        if (tlMatch && brMatch) {
-          const tlCol = columnLetterToNumber(tlMatch[1].toUpperCase());
-          const brCol = columnLetterToNumber(brMatch[1].toUpperCase());
-          const tlRow = parseInt(tlMatch[2], 10);
-          const brRow = parseInt(brMatch[2], 10);
-          
-          printAreaRows = { start: tlRow, end: brRow };
-          printAreaCols = { start: tlCol, end: brCol };
-        }
-      }
-    } catch (err) {
-      console.warn('인쇄영역 파싱 실패, 전체 시트 사용', err);
-    }
+    const bounds = parsePrintAreaBounds(
+      originalPrintArea,
+      worksheet.actualRowCount || 100,
+      worksheet.actualColumnCount || 26
+    );
+    printAreaRows = bounds.rows;
+    printAreaCols = bounds.cols;
   }
 
   console.log(`[렌더링] 행: ${printAreaRows.start}-${printAreaRows.end}, 열: ${printAreaCols.start}-${printAreaCols.end}`);

@@ -56,3 +56,74 @@ export const isSignaturePlaceholder = (value: string): boolean => {
 export const randomInt = (min: number, max: number): number => {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 };
+
+export interface PrintAreaBounds {
+  rows: { start: number; end: number };
+  cols: { start: number; end: number };
+}
+
+const isValidPrintAreaRange = (tlRow: number, brRow: number, tlCol: number, brCol: number): boolean => {
+  return tlRow > 0 && brRow > 0 && tlCol > 0 && brCol > 0 &&
+         tlRow <= brRow && tlCol <= brCol;
+};
+
+/**
+ * Excel printArea 문자열을 안전하게 파싱
+ * 지원 예시: A1:C10, Sheet1!A1:C10, $A$1:$C$10, Sheet1!$A$1:$C$10, A1
+ */
+export const parsePrintAreaBounds = (
+  printArea: string | undefined,
+  defaultRowEnd: number,
+  defaultColEnd: number
+): PrintAreaBounds => {
+  const fallback: PrintAreaBounds = {
+    rows: { start: 1, end: Math.max(1, defaultRowEnd || 1) },
+    cols: { start: 1, end: Math.max(1, defaultColEnd || 1) },
+  };
+
+  if (!printArea || !printArea.trim()) {
+    return fallback;
+  }
+
+  try {
+    let range = printArea.trim();
+
+    if (range.includes('!')) {
+      range = range.split('!').pop() || range;
+    }
+
+    range = range.replace(/\$/g, '');
+    const parts = range.split(':').map(part => part.trim());
+
+    if (parts.length === 1) {
+      const single = parseCellAddress(parts[0]);
+      if (!single) return fallback;
+      return {
+        rows: { start: single.row, end: single.row },
+        cols: { start: single.col, end: single.col },
+      };
+    }
+
+    if (parts.length !== 2) {
+      return fallback;
+    }
+
+    const topLeft = parseCellAddress(parts[0]);
+    const bottomRight = parseCellAddress(parts[1]);
+
+    if (!topLeft || !bottomRight) {
+      return fallback;
+    }
+
+    if (!isValidPrintAreaRange(topLeft.row, bottomRight.row, topLeft.col, bottomRight.col)) {
+      return fallback;
+    }
+
+    return {
+      rows: { start: topLeft.row, end: bottomRight.row },
+      cols: { start: topLeft.col, end: bottomRight.col },
+    };
+  } catch {
+    return fallback;
+  }
+};

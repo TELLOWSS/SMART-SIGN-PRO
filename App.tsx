@@ -21,6 +21,7 @@ export default function App() {
   const [showGuide, setShowGuide] = useState(false);
   const [toast, setToast] = useState<{msg: string, type: 'success' | 'info'} | null>(null);
   const [exportFormat, setExportFormat] = useState<'excel' | 'pdf' | 'png'>('excel');
+  const signaturesRef = useRef<Map<string, SignatureFile[]>>(new Map());
   
   // Refs to clear file inputs
   const excelInputRef = useRef<HTMLInputElement>(null);
@@ -33,6 +34,32 @@ export default function App() {
       return () => clearTimeout(timer);
     }
   }, [toast]);
+
+  useEffect(() => {
+    signaturesRef.current = state.signatures;
+  }, [state.signatures]);
+
+  useEffect(() => {
+    return () => {
+      cleanupBlobUrls(signaturesRef.current);
+    };
+  }, []);
+
+  const getUserFacingExportError = (errorMessage: string, format: 'excel' | 'pdf' | 'png') => {
+    if (/out of memory|allocation failed|array buffer allocation failed/i.test(errorMessage)) {
+      return `메모리 부족으로 ${format.toUpperCase()} 내보내기에 실패했습니다.\n파일 크기나 이미지 해상도를 낮춘 뒤 다시 시도해주세요.`;
+    }
+
+    if (/파일이 비어|empty|0 bytes|too small|손상|zip 형식/i.test(errorMessage)) {
+      return `생성된 파일이 유효하지 않습니다.\n원본 파일 형식(XLSX)과 서명 이미지를 확인한 뒤 다시 시도해주세요.`;
+    }
+
+    if (/worksheet|워크시트|print area|인쇄영역/i.test(errorMessage)) {
+      return `워크시트 구조를 처리하는 중 오류가 발생했습니다.\n병합셀/인쇄영역이 복잡한 경우 단순화한 파일로 먼저 테스트해주세요.`;
+    }
+
+    return `${format.toUpperCase()} 내보내기 중 오류가 발생했습니다.\n잠시 후 다시 시도하거나 브라우저를 새로고침해주세요.`;
+  };
 
   // --- Handlers ---
 
@@ -218,6 +245,7 @@ export default function App() {
 
     setProcessing(true);
     const startTime = performance.now();
+    const errorId = `EXP-${Date.now().toString(36).toUpperCase()}`;
     
     // 콘솔 로그 활성화
     const originalLog = console.log;
@@ -326,13 +354,15 @@ export default function App() {
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : "알 수 없는 오류";
       console.error(`========== [오류 발생] ==========`);
+      console.error(`에러 ID: ${errorId}`);
       console.error(`에러 메시지: ${errorMsg}`);
       console.error(`스택:\n${err instanceof Error ? err.stack : '없음'}`);
       console.error(`========== [디버그 로그] ==========`);
       console.error(logBuffer.join('\n'));
       console.error(`========================================\n`);
-      
-      setError(`❌ 파일 생성 실패 (${exportFormat.toUpperCase()})\n\n에러: ${errorMsg}\n\n📋 진단:\n- 브라우저 개발자 도구(F12) → 콘솔 탭에서 위의 디버그 로그 확인\n- 파일 크기 줄이기\n- 이미지 해상도 낮추기\n- 장수 적게 하기`);
+
+      const userMessage = getUserFacingExportError(errorMsg, exportFormat);
+      setError(`❌ 파일 생성 실패 (${exportFormat.toUpperCase()})\n\n${userMessage}\n\n문의/재현 확인용 오류 ID: ${errorId}`);
     } finally {
       console.log = originalLog;
       setProcessing(false);
