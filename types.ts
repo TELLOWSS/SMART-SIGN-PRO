@@ -23,11 +23,15 @@ export interface SheetData {
   rows: RowData[];
   mergedCells?: string[]; // Array of merged cell ranges like "A1:B2"
   printArea?: string; // Print area range like "A1:Z100"
+  sheetIndex?: number; // 0-based worksheet index in workbook
+  sheets?: SheetData[]; // Optional workbook-level sheet collection (first sheet remains primary)
 }
 
 export interface SignatureAssignment {
   row: number;
   col: number;
+  sheetIndex?: number; // 0-based worksheet index
+  sheetName?: string;
   signatureBaseName: string; // "HongGilDong"
   signatureVariantId: string; // Specific file ID used
   rotation: number; // Degrees -5 to 5

@@ -168,6 +168,72 @@ const rotateImage = async (blobUrl: string, degrees: number): Promise<string> =>
  * 업로드된 엑셀 파일 버퍼를 파싱
  * 강화된 유효성 검사 포함
  */
+const extractWorksheetData = (worksheet: ExcelJS.Worksheet, sheetIndex: number): SheetData => {
+  const printArea = worksheet.pageSetup?.printArea;
+  const printAreaBounds = parsePrintAreaBounds(
+    printArea,
+    worksheet.actualRowCount || 1000,
+    worksheet.actualColumnCount || 26
+  );
+  const hasExplicitPrintArea = !!printArea;
+
+  const rows: RowData[] = [];
+
+  // --- Infinite Row Protection ---
+  const MAX_ROWS = 10000;
+  const MAX_CONSECUTIVE_EMPTY_ROWS = 100;
+  let consecutiveEmptyCount = 0;
+  let totalNonEmptyRowCount = 0;
+
+  worksheet.eachRow({ includeEmpty: true }, (row, rowNumber) => {
+    // 인쇄영역이 있으면 범위 내를 끝까지 읽고, 없으면 안전 상한으로 보호한다.
+    if (hasExplicitPrintArea && rowNumber > printAreaBounds.rows.end) return;
+    if (!hasExplicitPrintArea && rowNumber > MAX_ROWS) return;
+    if (!hasExplicitPrintArea && consecutiveEmptyCount > MAX_CONSECUTIVE_EMPTY_ROWS) return;
+    if (totalNonEmptyRowCount >= MAX_ROWS) return;
+
+    let hasContent = false;
+    const cells: CellData[] = [];
+
+    row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
+      const stringValue = getCellValueAsString(cell);
+      if (stringValue.trim() !== '') {
+        hasContent = true;
+      }
+
+      cells.push({
+        value: stringValue,
+        address: cell.address,
+        row: rowNumber,
+        col: colNumber,
+      });
+    });
+
+    if (hasContent) {
+      consecutiveEmptyCount = 0;
+      totalNonEmptyRowCount++;
+      rows.push({ index: rowNumber, cells });
+    } else {
+      consecutiveEmptyCount++;
+      if (consecutiveEmptyCount <= MAX_CONSECUTIVE_EMPTY_ROWS) {
+        rows.push({ index: rowNumber, cells });
+      }
+    }
+  });
+
+  const mergedCells = worksheet.model.merges ? [...worksheet.model.merges] : [];
+  console.log(`[parseExcelFile] Sheet#${sheetIndex + 1}(${worksheet.name}) merged cells: ${mergedCells.length}`);
+  console.log(`[parseExcelFile] Sheet#${sheetIndex + 1}(${worksheet.name}) print area: ${printArea || 'Not set'}`);
+
+  return {
+    name: worksheet.name || `Sheet${sheetIndex + 1}`,
+    rows,
+    mergedCells,
+    printArea,
+    sheetIndex,
+  };
+};
+
 export const parseExcelFile = async (buffer: ArrayBuffer): Promise<SheetData> => {
   if (!buffer || buffer.byteLength === 0) {
     throw new Error("파일 버퍼가 비어있습니다.");
@@ -180,75 +246,20 @@ export const parseExcelFile = async (buffer: ArrayBuffer): Promise<SheetData> =>
     throw new Error("파일을 읽을 수 없습니다. 손상된 XLSX 파일이거나 다른 형식입니다.");
   }
 
-  const worksheet = workbook.worksheets[0];
-  if (!worksheet) throw new Error("파일에서 워크시트를 찾을 수 없습니다.");
+  if (!workbook.worksheets.length) {
+    throw new Error("파일에서 워크시트를 찾을 수 없습니다.");
+  }
 
-  const printArea = worksheet.pageSetup?.printArea;
-  const printAreaBounds = parsePrintAreaBounds(
-    printArea,
-    worksheet.actualRowCount || 1000,
-    worksheet.actualColumnCount || 26
-  );
-  const hasExplicitPrintArea = !!printArea;
+  const sheets = workbook.worksheets.map((worksheet, index) => extractWorksheetData(worksheet, index));
+  const primary = sheets.find(sheet => sheet.rows.length > 0) || sheets[0];
 
-  const rows: RowData[] = [];
-  
-  // --- Infinite Row Protection ---
-  const MAX_ROWS = 10000;
-  const MAX_CONSECUTIVE_EMPTY_ROWS = 100;
-  let consecutiveEmptyCount = 0;
-  let totalRowCount = 0;
-
-  worksheet.eachRow({ includeEmpty: true }, (row, rowNumber) => {
-    // 인쇄영역이 있으면 범위 내를 끝까지 읽고, 없으면 안전 상한으로 보호한다.
-    if (hasExplicitPrintArea && rowNumber > printAreaBounds.rows.end) return;
-    if (!hasExplicitPrintArea && rowNumber > MAX_ROWS) return;
-    if (!hasExplicitPrintArea && consecutiveEmptyCount > MAX_CONSECUTIVE_EMPTY_ROWS) return;
-
-    let hasContent = false;
-    const cells: CellData[] = [];
-
-    row.eachCell({ includeEmpty: true }, (cell, colNumber) => {
-      const stringValue = getCellValueAsString(cell);
-      if (stringValue.trim() !== '') {
-        hasContent = true;
-      }
-      cells.push({
-        value: stringValue,
-        address: cell.address,
-        row: rowNumber,
-        col: colNumber,
-      });
-    });
-
-    if (hasContent) {
-      consecutiveEmptyCount = 0;
-      rows.push({ index: rowNumber, cells });
-      totalRowCount++;
-    } else {
-      consecutiveEmptyCount++;
-      if (consecutiveEmptyCount <= MAX_CONSECUTIVE_EMPTY_ROWS) {
-         rows.push({ index: rowNumber, cells });
-      }
-    }
-  });
-
-  if (rows.length === 0) {
+  if (!primary || sheets.every(sheet => sheet.rows.length === 0)) {
     throw new Error("파일에 데이터가 없습니다.");
   }
 
-  // Extract merged cells information
-  const mergedCells = worksheet.model.merges ? [...worksheet.model.merges] : [];
-  console.log(`[parseExcelFile] Merged cells detected: ${mergedCells.length}`);
-  
-  // Extract print area information
-  console.log(`[parseExcelFile] Print area: ${printArea || 'Not set'}`);
-
   return {
-    name: worksheet.name || 'Sheet1',
-    rows,
-    mergedCells,
-    printArea,
+    ...primary,
+    sheets,
   };
 };
 
@@ -275,7 +286,7 @@ export const autoMatchSignatures = (
   const offsetXLimit = Math.max(1, Math.round(2 + strengthFactor * 2));
   const offsetYLimit = Math.max(1, Math.round(1 + strengthFactor * 2));
   
-  if (!sheetData || sheetData.rows.length === 0) {
+  if (!sheetData) {
     console.warn("시트 데이터가 없습니다.");
     return assignments;
   }
@@ -285,69 +296,74 @@ export const autoMatchSignatures = (
     return assignments;
   }
   
-  const mergedCells = sheetData.mergedCells || [];
-  console.log(`[autoMatch] 병합된 셀: ${mergedCells.length}개`);
-  
-  let nameColIndex = -1;
-  let headerRowIndex = -1;
-  const MAX_HEADER_SEARCH_ROWS = Math.min(50, sheetData.rows.length);
-
-  // Find name column
-  for (let r = 0; r < MAX_HEADER_SEARCH_ROWS; r++) {
-    const row = sheetData.rows[r];
-    for (const cell of row.cells) {
-      if (!cell.value) continue;
-      const rawVal = cell.value.toString().trim();
-      if (!rawVal) continue;
-      
-      const normalizedValue = rawVal.replace(/[\s\u00A0\uFEFF]+/g, '');
-      // More comprehensive name column detection
-      if (/(성명|이름|name|person|employee|직원|직급)/i.test(normalizedValue)) {
-        nameColIndex = cell.col;
-        headerRowIndex = r;
-        console.log(`Name column found: col ${nameColIndex} in row ${r}`);
-        break;
-      }
-    }
-    if (nameColIndex !== -1) break;
-  }
-
-  if (nameColIndex === -1) {
-    console.warn("성명/이름 열을 자동으로 찾을 수 없습니다. 표준 형식을 확인해주세요.");
-    return assignments;
-  }
-
   let matchedCount = 0;
   let totalDataRows = 0;
 
-  // Match signatures
-  for (let r = headerRowIndex + 1; r < sheetData.rows.length; r++) {
-    const row = sheetData.rows[r];
-    const nameCell = row.cells.find(c => c.col === nameColIndex);
-    if (!nameCell || !nameCell.value) continue;
+  const targetSheets = (sheetData.sheets && sheetData.sheets.length > 0)
+    ? sheetData.sheets
+    : [sheetData];
 
-    totalDataRows++;
-    const rawName = nameCell.value.toString();
-    const cleanName = normalizeName(rawName);
+  for (let sheetOrder = 0; sheetOrder < targetSheets.length; sheetOrder++) {
+    const currentSheet = targetSheets[sheetOrder];
+    const sheetRows = currentSheet.rows || [];
+    const currentSheetIndex = currentSheet.sheetIndex ?? sheetOrder;
+    const mergedCells = currentSheet.mergedCells || [];
 
-    if (!cleanName) continue;
+    if (sheetRows.length === 0) {
+      console.log(`[autoMatch] Sheet#${currentSheetIndex + 1}(${currentSheet.name}) 데이터 없음 - 스킵`);
+      continue;
+    }
 
-    const availableSigs = signatures.get(cleanName);
-    
-    // 방어적 코드: 손상된 파일/빈 variant를 제외한 유효 서명만 사용
-    const validAvailableSigs = (availableSigs || []).filter((sig): sig is SignatureFile => {
-      return !!sig && typeof sig.variant === 'string' && sig.variant.trim().length > 0;
-    });
+    console.log(`[autoMatch] Sheet#${currentSheetIndex + 1}(${currentSheet.name}) 병합된 셀: ${mergedCells.length}개`);
 
-    if (validAvailableSigs.length > 0) {
-      // Track used signature variants in this row to prevent immediate reuse
-      // This creates more natural variation when multiple placeholders exist
+    let nameColIndex = -1;
+    let headerRowIndex = -1;
+    const maxHeaderSearchRows = Math.min(50, sheetRows.length);
+
+    for (let r = 0; r < maxHeaderSearchRows; r++) {
+      const row = sheetRows[r];
+      for (const cell of row.cells) {
+        if (!cell.value) continue;
+        const rawVal = cell.value.toString().trim();
+        if (!rawVal) continue;
+
+        const normalizedValue = rawVal.replace(/[\s\u00A0\uFEFF]+/g, '');
+        if (/(성명|이름|name|person|employee|직원|직급)/i.test(normalizedValue)) {
+          nameColIndex = cell.col;
+          headerRowIndex = r;
+          console.log(`[autoMatch] Sheet#${currentSheetIndex + 1} name column: col ${nameColIndex}, row ${r}`);
+          break;
+        }
+      }
+      if (nameColIndex !== -1) break;
+    }
+
+    if (nameColIndex === -1) {
+      console.warn(`[autoMatch] Sheet#${currentSheetIndex + 1} 성명/이름 열을 찾지 못해 스킵`);
+      continue;
+    }
+
+    for (let r = headerRowIndex + 1; r < sheetRows.length; r++) {
+      const row = sheetRows[r];
+      const nameCell = row.cells.find(c => c.col === nameColIndex);
+      if (!nameCell || !nameCell.value) continue;
+
+      totalDataRows++;
+      const rawName = nameCell.value.toString();
+      const cleanName = normalizeName(rawName);
+
+      if (!cleanName) continue;
+
+      const availableSigs = signatures.get(cleanName);
+      const validAvailableSigs = (availableSigs || []).filter((sig): sig is SignatureFile => {
+        return !!sig && typeof sig.variant === 'string' && sig.variant.trim().length > 0;
+      });
+
+      if (validAvailableSigs.length === 0) continue;
+
       const usedVariantsInRow = new Set<string>();
       const queuedVariantsInRow: SignatureFile[] = [];
 
-      // 지능적 셔플링: 사용 가능한 후보군을 무작위로 섞어 큐에 채운다.
-      // - 일반 상황: 아직 사용하지 않은 variant들만 셔플
-      // - 모든 variant 소진 후 리셋 상황: 전체 variant를 다시 셔플
       const refillVariantQueue = () => {
         const remaining = validAvailableSigs.filter(sig => !usedVariantsInRow.has(sig.variant));
         const refillSource = remaining.length > 0 ? remaining : validAvailableSigs;
@@ -359,69 +375,63 @@ export const autoMatchSignatures = (
         const shuffled = shuffleArray(refillSource);
         queuedVariantsInRow.push(...shuffled);
       };
-      
+
       for (const cell of row.cells) {
         if (cell.col === nameColIndex) continue;
         if (!cell.value) continue;
         const cellStr = cell.value.toString().replace(/[\s\u00A0\uFEFF]+/g, '');
-        
-        // Check for signature marker
-        if (isSignaturePlaceholder(cellStr)) {
-          // Skip if cell is in a merged range but not the top-left cell
-          if (isCellInMergedRange(cell.row, cell.col, mergedCells)) {
-            if (!isTopLeftOfMergedCell(cell.row, cell.col, mergedCells)) {
-              console.log(`  [autoMatch] 스킵: (${cell.row},${cell.col}) 병합셀 내부`);
-              continue;
-            }
-          }
-          
-          const key = `${cell.row}:${cell.col}`;
 
-          if (queuedVariantsInRow.length === 0) {
-            refillVariantQueue();
-          }
+        if (!isSignaturePlaceholder(cellStr)) continue;
 
-          let selectedSig = queuedVariantsInRow.shift();
-
-          // 큐가 비정상적으로 비어 있거나 손상 데이터가 섞인 경우를 대비한 방어 로직
-          while (selectedSig && (!selectedSig.variant || selectedSig.variant.trim().length === 0)) {
-            selectedSig = queuedVariantsInRow.shift();
-          }
-
-          if (!selectedSig && validAvailableSigs.length > 0) {
-            refillVariantQueue();
-            selectedSig = queuedVariantsInRow.shift();
-          }
-          
-          // Safety check: ensure we have a valid signature
-          if (!selectedSig || !selectedSig.variant) {
-            console.warn(`  [autoMatch] 경고: (${cell.row},${cell.col}) 유효하지 않은 서명 - 스킵`);
+        if (isCellInMergedRange(cell.row, cell.col, mergedCells)) {
+          if (!isTopLeftOfMergedCell(cell.row, cell.col, mergedCells)) {
+            console.log(`  [autoMatch] Sheet#${currentSheetIndex + 1} 스킵: (${cell.row},${cell.col}) 병합셀 내부`);
             continue;
           }
-          
-          // Mark this variant as used in this row
-          usedVariantsInRow.add(selectedSig.variant);
-          
-          // Random offset calculations for natural variation
-          // Using helper function for cleaner code and consistent ranges
-          const rotation = randomInt(-rotationLimit, rotationLimit);
-          const scale = randomFloat(minScale, maxScale);
-          const offsetX = randomInt(-offsetXLimit, offsetXLimit);
-          const offsetY = randomInt(-offsetYLimit, offsetYLimit);
-
-          assignments.set(key, {
-            row: cell.row,
-            col: cell.col,
-            signatureBaseName: cleanName,
-            signatureVariantId: selectedSig.variant,
-            rotation,
-            scale,
-            offsetX,
-            offsetY,
-          });
-          
-          matchedCount++;
         }
+
+        const key = `s${currentSheetIndex}:${cell.row}:${cell.col}`;
+
+        if (queuedVariantsInRow.length === 0) {
+          refillVariantQueue();
+        }
+
+        let selectedSig = queuedVariantsInRow.shift();
+        while (selectedSig && (!selectedSig.variant || selectedSig.variant.trim().length === 0)) {
+          selectedSig = queuedVariantsInRow.shift();
+        }
+
+        if (!selectedSig && validAvailableSigs.length > 0) {
+          refillVariantQueue();
+          selectedSig = queuedVariantsInRow.shift();
+        }
+
+        if (!selectedSig || !selectedSig.variant) {
+          console.warn(`  [autoMatch] Sheet#${currentSheetIndex + 1} 경고: (${cell.row},${cell.col}) 유효하지 않은 서명 - 스킵`);
+          continue;
+        }
+
+        usedVariantsInRow.add(selectedSig.variant);
+
+        const rotation = randomInt(-rotationLimit, rotationLimit);
+        const scale = randomFloat(minScale, maxScale);
+        const offsetX = randomInt(-offsetXLimit, offsetXLimit);
+        const offsetY = randomInt(-offsetYLimit, offsetYLimit);
+
+        assignments.set(key, {
+          row: cell.row,
+          col: cell.col,
+          sheetIndex: currentSheetIndex,
+          sheetName: currentSheet.name,
+          signatureBaseName: cleanName,
+          signatureVariantId: selectedSig.variant,
+          rotation,
+          scale,
+          offsetX,
+          offsetY,
+        });
+
+        matchedCount++;
       }
     }
   }
@@ -673,44 +683,58 @@ export const generateFinalExcel = async (
     throw new Error(`파일 로드 실패: ${err instanceof Error ? err.message : '알수없음'}`);
   }
 
-  const worksheet = workbook.worksheets[0];
-  if (!worksheet) {
+  const firstWorksheet = workbook.worksheets[0];
+  if (!firstWorksheet) {
     throw new Error("워크시트를 찾을 수 없습니다.");
   }
 
-  console.log(`[로드완료] 행: ${worksheet.actualRowCount}, 열: ${worksheet.actualColumnCount}, 워크시트 수: ${workbook.worksheets.length}`);
-
-  // 병합된 셀 정보 읽기 (읽기만 - 조작 금지!)
-  const originalMergedCells = worksheet.model.merges ? getUniqueMergeRanges([...worksheet.model.merges]) : [];
-  console.log(`[병합셀] 원본 병합된 셀: ${originalMergedCells.length}개 (읽기만, 조작 금지)`);
-  const originalMergeDiag = getMergeDiagnostics((worksheet.model.merges || []) as string[]);
-  console.log(`[병합셀진단] 원본 total=${originalMergeDiag.total}, unique=${originalMergeDiag.unique}, duplicates=${originalMergeDiag.duplicates}`);
-  for (const merge of originalMergedCells) {
-    console.log(`  - ${merge}`);
-  }
-
-  // 인쇄영역 정보 읽기 (읽기만 - 조작 금지!)
-  const originalPrintArea = worksheet.pageSetup?.printArea;
-  console.log(`[인쇄영역] 원본 인쇄영역: ${originalPrintArea || '설정 안 됨'} (읽기만, 조작 금지)`);
+  console.log(`[로드완료] 행: ${firstWorksheet.actualRowCount}, 열: ${firstWorksheet.actualColumnCount}, 워크시트 수: ${workbook.worksheets.length}`);
 
   // 여러 워크시트 문제 체크
   if (workbook.worksheets.length > 1) {
     console.warn(`⚠️ 경고: 원본 파일에 ${workbook.worksheets.length}개 시트가 있습니다.`);
   }
 
-  // 인쇄영역 범위 파싱 (서명 배치 범위 제한용)
-  const printAreaBounds = parsePrintAreaBounds(
-    originalPrintArea,
-    worksheet.actualRowCount || 1000,
-    worksheet.actualColumnCount || 26
-  );
-  const printAreaRows = printAreaBounds.rows;
-  const printAreaCols = printAreaBounds.cols;
+  interface WorksheetExportContext {
+    index: number;
+    worksheet: ExcelJS.Worksheet;
+    originalMergedCells: string[];
+    originalPrintArea: string | undefined;
+    printAreaRows: { start: number; end: number };
+    printAreaCols: { start: number; end: number };
+  }
 
-  if (originalPrintArea) {
-    console.log(`[인쇄영역파싱] 행: ${printAreaRows.start}-${printAreaRows.end}, 열: ${printAreaCols.start}-${printAreaCols.end}`);
-  } else {
-    console.log(`[인쇄영역] 설정되지 않음 - 전체 시트 사용 (행: 1-${printAreaRows.end}, 열: 1-${printAreaCols.end})`);
+  const worksheetContexts = new Map<number, WorksheetExportContext>();
+  for (let index = 0; index < workbook.worksheets.length; index++) {
+    const worksheet = workbook.worksheets[index];
+    const originalMergedCells = worksheet.model.merges ? getUniqueMergeRanges([...worksheet.model.merges]) : [];
+    const originalPrintArea = worksheet.pageSetup?.printArea;
+    const printAreaBounds = parsePrintAreaBounds(
+      originalPrintArea,
+      worksheet.actualRowCount || 1000,
+      worksheet.actualColumnCount || 26
+    );
+
+    const context: WorksheetExportContext = {
+      index,
+      worksheet,
+      originalMergedCells,
+      originalPrintArea,
+      printAreaRows: printAreaBounds.rows,
+      printAreaCols: printAreaBounds.cols,
+    };
+
+    worksheetContexts.set(index, context);
+
+    console.log(`[병합셀] Sheet#${index + 1}(${worksheet.name}) 원본 병합: ${originalMergedCells.length}개`);
+    const mergeDiag = getMergeDiagnostics((worksheet.model.merges || []) as string[]);
+    console.log(`[병합셀진단] Sheet#${index + 1} total=${mergeDiag.total}, unique=${mergeDiag.unique}, duplicates=${mergeDiag.duplicates}`);
+
+    if (originalPrintArea) {
+      console.log(`[인쇄영역] Sheet#${index + 1} 범위: 행 ${context.printAreaRows.start}-${context.printAreaRows.end}, 열 ${context.printAreaCols.start}-${context.printAreaCols.end}`);
+    } else {
+      console.log(`[인쇄영역] Sheet#${index + 1} 미설정 - 전체 시트 사용`);
+    }
   }
 
   // Step 2: 할당된 서명 처리
@@ -730,7 +754,7 @@ export const generateFinalExcel = async (
    * Excel 열 너비(문자 단위)를 픽셀로 변환
    * - Excel 기본 폭(8.43ch)과 렌더링 패딩을 고려해 근사치 계산
    */
-  const getColumnPixelWidth = (col: number): number => {
+  const getColumnPixelWidth = (worksheet: ExcelJS.Worksheet, col: number): number => {
     const DEFAULT_COL_WIDTH_CH = 8.43;
     const PIXELS_PER_CHAR = 7;
     const CELL_PADDING = 5;
@@ -742,7 +766,7 @@ export const generateFinalExcel = async (
    * Excel 행 높이(pt)를 픽셀로 변환
    * - 기본 행 높이 15pt를 사용하며, 브라우저 96DPI 기준으로 환산
    */
-  const getRowPixelHeight = (row: number): number => {
+  const getRowPixelHeight = (worksheet: ExcelJS.Worksheet, row: number): number => {
     const DEFAULT_ROW_HEIGHT_PT = 15;
     const PIXELS_PER_POINT = 96 / 72;
     const rowHeightPt = worksheet.getRow(row).height || DEFAULT_ROW_HEIGHT_PT;
@@ -752,8 +776,12 @@ export const generateFinalExcel = async (
   /**
    * 특정 셀이 병합셀의 좌상단인 경우 해당 병합 범위를 반환
    */
-  const getMergedRangeForTopLeft = (row: number, col: number): { startRow: number; endRow: number; startCol: number; endCol: number } | null => {
-    for (const range of originalMergedCells) {
+  const getMergedRangeForTopLeft = (
+    row: number,
+    col: number,
+    mergedCells: string[]
+  ): { startRow: number; endRow: number; startCol: number; endCol: number } | null => {
+    for (const range of mergedCells) {
       const [start, end] = range.split(':');
       const startPos = parseCellAddress(start);
       const endPos = parseCellAddress(end || start);
@@ -775,13 +803,18 @@ export const generateFinalExcel = async (
   /**
    * 서명 배치 대상 셀(또는 병합셀)의 실제 렌더링 영역(픽셀)을 계산
    */
-  const getTargetCellBox = (row: number, col: number): { width: number; height: number } => {
-    const mergedRange = getMergedRangeForTopLeft(row, col);
+  const getTargetCellBox = (
+    worksheet: ExcelJS.Worksheet,
+    row: number,
+    col: number,
+    mergedCells: string[]
+  ): { width: number; height: number } => {
+    const mergedRange = getMergedRangeForTopLeft(row, col, mergedCells);
 
     if (!mergedRange) {
       return {
-        width: getColumnPixelWidth(col),
-        height: getRowPixelHeight(row),
+        width: getColumnPixelWidth(worksheet, col),
+        height: getRowPixelHeight(worksheet, row),
       };
     }
 
@@ -789,10 +822,10 @@ export const generateFinalExcel = async (
     let totalHeight = 0;
 
     for (let c = mergedRange.startCol; c <= mergedRange.endCol; c++) {
-      totalWidth += getColumnPixelWidth(c);
+      totalWidth += getColumnPixelWidth(worksheet, c);
     }
     for (let r = mergedRange.startRow; r <= mergedRange.endRow; r++) {
-      totalHeight += getRowPixelHeight(r);
+      totalHeight += getRowPixelHeight(worksheet, r);
     }
 
     return {
@@ -802,16 +835,17 @@ export const generateFinalExcel = async (
   };
 
   // 좌표가 인쇄영역 내인지 확인
-  const isInPrintArea = (row: number, col: number) => {
-    return row >= printAreaRows.start && row <= printAreaRows.end &&
-           col >= printAreaCols.start && col <= printAreaCols.end;
+  const isInPrintArea = (row: number, col: number, context: WorksheetExportContext) => {
+      return row >= context.printAreaRows.start && row <= context.printAreaRows.end &&
+        col >= context.printAreaCols.start && col <= context.printAreaCols.end;
   };
 
   // 병합된 셀 범위 내인지 확인 (병합셀이 아니거나 왼쪽 상단 셀만 허용)
-  const canPlaceSignature = (row: number, col: number) => {
+  const canPlaceSignature = (row: number, col: number, context: WorksheetExportContext) => {
+    const mergedCells = context.originalMergedCells;
     // 병합된 셀이면 왼쪽 상단 셀인 경우만 허용
-    if (isCellInMergedRange(row, col, originalMergedCells)) {
-      if (isTopLeftOfMergedCell(row, col, originalMergedCells)) {
+    if (isCellInMergedRange(row, col, mergedCells)) {
+      if (isTopLeftOfMergedCell(row, col, mergedCells)) {
         console.log(`  ⓘ (${row},${col}) 병합셀의 왼쪽 상단 - 배치 허용`);
         return true;
       } else {
@@ -838,16 +872,26 @@ export const generateFinalExcel = async (
 
     try {
       const assignment = assignmentValues[i];
+      const targetSheetIndex = assignment.sheetIndex ?? 0;
+      const context = worksheetContexts.get(targetSheetIndex);
+
+      if (!context) {
+        console.warn(`  ✗ 대상 시트를 찾을 수 없음: Sheet#${targetSheetIndex + 1}`);
+        skippedCount++;
+        continue;
+      }
+
+      const worksheet = context.worksheet;
 
       // 인쇄영역 범위 확인
-      if (!isInPrintArea(assignment.row, assignment.col)) {
-        console.log(`  ⊘ (${assignment.row},${assignment.col}) 인쇄영역 밖 - 스킵`);
+      if (!isInPrintArea(assignment.row, assignment.col, context)) {
+        console.log(`  ⊘ Sheet#${targetSheetIndex + 1} (${assignment.row},${assignment.col}) 인쇄영역 밖 - 스킵`);
         skippedCount++;
         continue;
       }
 
       // 병합된 셀 확인
-      if (!canPlaceSignature(assignment.row, assignment.col)) {
+      if (!canPlaceSignature(assignment.row, assignment.col, context)) {
         skippedCount++;
         continue;
       }
@@ -934,7 +978,7 @@ export const generateFinalExcel = async (
           // 1) 셀(또는 병합셀) 영역을 기준으로 더 좁은 축에 맞춘다.
           // 2) scale(1.15~1.35)을 반영하되, 실제 사람이 서명 시 살짝 칸을 넘기는 느낌을 위해
           //    오버플로우 허용치를 부여한다.
-          const box = getTargetCellBox(assignment.row, assignment.col);
+          const box = getTargetCellBox(worksheet, assignment.row, assignment.col, context.originalMergedCells);
           const narrowSide = Math.max(16, Math.min(box.width, box.height));
           const broadSide = Math.max(box.width, box.height);
           const imgRatio = sigFile.width / sigFile.height;
@@ -1019,7 +1063,7 @@ export const generateFinalExcel = async (
             });
 
             processedCount++;
-            console.log(`  ✓ 배치됨: (${assignment.row},${assignment.col}) ID:${imageId}`);
+            console.log(`  ✓ 배치됨: Sheet#${targetSheetIndex + 1} (${assignment.row},${assignment.col}) ID:${imageId}`);
           } catch (posErr) {
             console.warn(`  ⚠ oneCell 배치 실패, absolute 폴백 시도 (${assignment.row}, ${assignment.col})`, posErr);
 
@@ -1037,7 +1081,7 @@ export const generateFinalExcel = async (
 
               processedCount++;
               fallbackAnchorCount++;
-              console.log(`  ✓ absolute 폴백 배치 성공: (${assignment.row},${assignment.col}) ID:${imageId}`);
+              console.log(`  ✓ absolute 폴백 배치 성공: Sheet#${targetSheetIndex + 1} (${assignment.row},${assignment.col}) ID:${imageId}`);
             } catch (fallbackErr) {
               console.error(`  ✗ addImage 폴백 배치 실패 (${assignment.row}, ${assignment.col}):`, fallbackErr);
               failureCount++;
@@ -1071,43 +1115,41 @@ export const generateFinalExcel = async (
   //   셀 데이터/서식을 직접 수정하지 않는다.
   // - 이후 병합셀은 원본 기준으로 다단계 검증/재적용하여 단 하나도 유실되지 않게 한다.
   console.log('[병합셀 방어] Zero-Damage 병합셀 무결성 검증 및 재적용 시작');
-  if (originalMergedCells.length > 0) {
-    enforceMergedCellsIntegrity(worksheet, originalMergedCells);
-  } else {
-    console.log('[병합셀 방어] 원본에 병합셀이 없어 재적용 생략');
-  }
-  
-  // 최종 확인: 병합된 셀과 인쇄영역이 여전히 존재하는지 확인
-  const finalMergedCells = worksheet.model.merges ? [...worksheet.model.merges] : [];
-  const finalPrintArea = worksheet.pageSetup?.printArea;
-  validateWorksheetPreservation(originalMergedCells, finalMergedCells, originalPrintArea, finalPrintArea);
+  for (const context of worksheetContexts.values()) {
+    const worksheet = context.worksheet;
+    const originalMergedCells = context.originalMergedCells;
+    const originalPrintArea = context.originalPrintArea;
+    const printAreaRows = context.printAreaRows;
+    const printAreaCols = context.printAreaCols;
 
-  const finalMergeDiag = getMergeDiagnostics(finalMergedCells);
-  console.log(`[병합셀진단] 복원후 total=${finalMergeDiag.total}, unique=${finalMergeDiag.unique}, duplicates=${finalMergeDiag.duplicates}`);
+    if (originalMergedCells.length > 0) {
+      enforceMergedCellsIntegrity(worksheet, originalMergedCells);
+    } else {
+      console.log(`[병합셀 방어] Sheet#${context.index + 1} 원본 병합셀이 없어 재적용 생략`);
+    }
 
-  // 저장 직전 최종 방어: 중복 병합 범위를 제거해 mergeCells XML 무결성을 보장
-  worksheet.model.merges = getUniqueMergeRanges((worksheet.model.merges || []) as string[]);
-  const dedupedMergeDiag = getMergeDiagnostics((worksheet.model.merges || []) as string[]);
-  console.log(`[병합셀진단] 저장직전 total=${dedupedMergeDiag.total}, unique=${dedupedMergeDiag.unique}, duplicates=${dedupedMergeDiag.duplicates}`);
-  
-  // Step 3.5: 인쇄영역 외부 Soft-clear
-  // 중요 방어 원칙:
-  // - spliceRows / spliceColumns 같은 구조 삭제 API는 절대 사용하지 않는다.
-  // - 행/열 구조를 삭제하면 Drawing(anchor) 관계가 깨져 서명 이미지가 증발하거나
-  //   Excel "파일 복구" 팝업이 발생할 수 있다.
-  // - 따라서 인쇄영역 밖 셀은 값/스타일만 초기화하는 Soft-clear로만 처리한다.
-  if (originalPrintArea) {
-    console.log(`[인쇄영역 제한] 인쇄영역 외부 Soft-clear 진행...`);
+    const finalMergedCells = worksheet.model.merges ? [...worksheet.model.merges] : [];
+    const finalPrintArea = worksheet.pageSetup?.printArea;
+    validateWorksheetPreservation(originalMergedCells, finalMergedCells, originalPrintArea, finalPrintArea);
+
+    const finalMergeDiag = getMergeDiagnostics(finalMergedCells);
+    console.log(`[병합셀진단] Sheet#${context.index + 1} 복원후 total=${finalMergeDiag.total}, unique=${finalMergeDiag.unique}, duplicates=${finalMergeDiag.duplicates}`);
+
+    worksheet.model.merges = getUniqueMergeRanges((worksheet.model.merges || []) as string[]);
+    const dedupedMergeDiag = getMergeDiagnostics((worksheet.model.merges || []) as string[]);
+    console.log(`[병합셀진단] Sheet#${context.index + 1} 저장직전 total=${dedupedMergeDiag.total}, unique=${dedupedMergeDiag.unique}, duplicates=${dedupedMergeDiag.duplicates}`);
+
+    if (!originalPrintArea) {
+      console.log(`[인쇄영역 제한] Sheet#${context.index + 1} 인쇄영역 미설정 - 전체 시트 유지`);
+      continue;
+    }
+
+    console.log(`[인쇄영역 제한] Sheet#${context.index + 1} 인쇄영역 외부 Soft-clear 진행...`);
     console.log(`  인쇄영역 범위: 행 ${printAreaRows.start}-${printAreaRows.end}, 열 ${printAreaCols.start}-${printAreaCols.end}`);
-    
+
     let clearedCellCount = 0;
     let touchedRowCount = 0;
 
-    // 실제 시트 사용 범위와 인쇄영역 끝점을 모두 고려해 순회 범위를 산정
-    // 유령 데이터 방어:
-    // - 일부 파일은 104만 행(Excel 최대 행 근처)에 찌꺼기 값이 남아 rowCount/actualRowCount가 비정상적으로 커진다.
-    // - 이 상태로 전 범위를 순회하면 브라우저가 멈출 수 있으므로,
-    //   인쇄영역 마지막 행 아래는 최대 N행까지만 Soft-clear를 수행한다.
     const MAX_EXTRA_ROWS_TO_SCAN = 10000;
     const worksheetRowCount = Math.max(worksheet.rowCount || 0, worksheet.actualRowCount || 0, 1);
     const maxRow = Math.max(
@@ -1118,7 +1160,7 @@ export const generateFinalExcel = async (
 
     if (worksheetRowCount > maxRow) {
       console.warn(
-        `[인쇄영역 제한] 유령 행 방어 활성화: rowCount=${worksheetRowCount}, 스캔상한=${maxRow} (인쇄영역 끝 + ${MAX_EXTRA_ROWS_TO_SCAN})`
+        `[인쇄영역 제한] Sheet#${context.index + 1} 유령 행 방어 활성화: rowCount=${worksheetRowCount}, 스캔상한=${maxRow}`
       );
     }
 
@@ -1138,7 +1180,6 @@ export const generateFinalExcel = async (
         const hasStyle = !!cell.style && Object.keys(cell.style).length > 0;
 
         if (hasValue || hasStyle) {
-          // Soft-clear: 구조는 유지하고 값/스타일만 비움
           cell.value = null;
           cell.style = {};
           clearedCellCount++;
@@ -1151,9 +1192,7 @@ export const generateFinalExcel = async (
       }
     }
 
-    console.log(`[인쇄영역 제한 완료] Soft-clear 셀: ${clearedCellCount}개, 영향 행: ${touchedRowCount}개, 스캔행 상한: ${maxRow}`);
-  } else {
-    console.log(`[인쇄영역 제한] 인쇄영역이 설정되지 않아 전체 시트 유지`);
+    console.log(`[인쇄영역 제한 완료] Sheet#${context.index + 1} Soft-clear 셀: ${clearedCellCount}개, 영향 행: ${touchedRowCount}개, 스캔행 상한: ${maxRow}`);
   }
   
   // Step 4: 워크북 저장
@@ -1213,7 +1252,7 @@ export const generateFinalExcel = async (
       if ((workbook as any)._rels) {
         console.log(`[정리] 워크북 관계 객체 발견`);
       }
-      if ((worksheet as any)._rels) {
+      if ((firstWorksheet as any)._rels) {
         console.log(`[정리] 워크시트 관계 객체 발견`);
       }
     } catch (e) {

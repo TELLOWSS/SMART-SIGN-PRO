@@ -113,7 +113,8 @@ export default function App() {
           state.excelBuffer as ArrayBuffer,
           state.assignments,
           state.signatures,
-          false
+          false,
+          state.sheetData?.sheetIndex ?? 0
         );
 
         if (!canceled) {
