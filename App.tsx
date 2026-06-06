@@ -113,7 +113,7 @@ export default function App() {
           state.excelBuffer as ArrayBuffer,
           state.assignments,
           state.signatures,
-          true
+          false
         );
 
         if (!canceled) {

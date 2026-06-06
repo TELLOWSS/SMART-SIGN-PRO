@@ -183,6 +183,14 @@ export const parseExcelFile = async (buffer: ArrayBuffer): Promise<SheetData> =>
   const worksheet = workbook.worksheets[0];
   if (!worksheet) throw new Error("파일에서 워크시트를 찾을 수 없습니다.");
 
+  const printArea = worksheet.pageSetup?.printArea;
+  const printAreaBounds = parsePrintAreaBounds(
+    printArea,
+    worksheet.actualRowCount || 1000,
+    worksheet.actualColumnCount || 26
+  );
+  const hasExplicitPrintArea = !!printArea;
+
   const rows: RowData[] = [];
   
   // --- Infinite Row Protection ---
@@ -192,9 +200,10 @@ export const parseExcelFile = async (buffer: ArrayBuffer): Promise<SheetData> =>
   let totalRowCount = 0;
 
   worksheet.eachRow({ includeEmpty: true }, (row, rowNumber) => {
-    // Stop if too many rows
-    if (totalRowCount >= MAX_ROWS) return;
-    if (consecutiveEmptyCount > MAX_CONSECUTIVE_EMPTY_ROWS) return;
+    // 인쇄영역이 있으면 범위 내를 끝까지 읽고, 없으면 안전 상한으로 보호한다.
+    if (hasExplicitPrintArea && rowNumber > printAreaBounds.rows.end) return;
+    if (!hasExplicitPrintArea && rowNumber > MAX_ROWS) return;
+    if (!hasExplicitPrintArea && consecutiveEmptyCount > MAX_CONSECUTIVE_EMPTY_ROWS) return;
 
     let hasContent = false;
     const cells: CellData[] = [];
@@ -233,7 +242,6 @@ export const parseExcelFile = async (buffer: ArrayBuffer): Promise<SheetData> =>
   console.log(`[parseExcelFile] Merged cells detected: ${mergedCells.length}`);
   
   // Extract print area information
-  const printArea = worksheet.pageSetup?.printArea;
   console.log(`[parseExcelFile] Print area: ${printArea || 'Not set'}`);
 
   return {
