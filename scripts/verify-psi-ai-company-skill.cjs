@@ -1,0 +1,15 @@
+const fs=require('node:fs');
+const assert=require('node:assert/strict');
+const root=fs.readFileSync('AGENTS.md','utf8');
+const skill=fs.readFileSync('.agents/skills/psi-ai-company/SKILL.md','utf8');
+const alias=fs.readFileSync('skills/psi-ai-company/SKILL.md','utf8');
+const profile=fs.readFileSync('docs/psi-ai-company/PRODUCT_PROFILE.md','utf8');
+assert.equal(skill,alias,'Canonical skill and compatibility copy must match');
+const lines=skill.split(String.fromCharCode(10));
+assert.equal(lines[0],'---','YAML frontmatter start missing');
+assert.equal(lines[1],'name: psi-ai-company','Skill ID mismatch');
+assert.ok(lines[2].startsWith('description: '),'Skill description missing');
+assert.ok(root.includes('.agents/skills/psi-ai-company/SKILL.md'),'AGENTS must point to discovery path');
+assert.ok(profile.includes('TELLOWSS/SMART-SIGN-PRO'),'Product repository mismatch');
+for(const name of ['아틀라스','나비','루미','코어','세이프','키퍼','프루프'])assert.ok(skill.includes(name),'Missing role: '+name);
+console.log('PSI AI STUDIO skill: PASS, 7 named roles, unique product mapping, discovered SKILL.md');
