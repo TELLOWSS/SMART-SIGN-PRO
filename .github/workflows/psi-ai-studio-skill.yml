@@ -1,0 +1,32 @@
+name: PSI AI Studio skill contract
+on:
+  pull_request:
+    paths:
+      - 'AGENTS.md'
+      - '.agents/skills/**'
+      - 'skills/psi-ai-company/**'
+      - 'docs/psi-ai-company/**'
+      - 'scripts/verify-psi-ai-company-skill.cjs'
+      - '.github/workflows/psi-ai-studio-skill.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'AGENTS.md'
+      - '.agents/skills/**'
+      - 'skills/psi-ai-company/**'
+      - 'docs/psi-ai-company/**'
+      - 'scripts/verify-psi-ai-company-skill.cjs'
+      - '.github/workflows/psi-ai-studio-skill.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  skill-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Verify source of truth, named roles and product identity
+        run: node scripts/verify-psi-ai-company-skill.cjs
