@@ -1,0 +1,13 @@
+const fs=require('node:fs');
+const assert=require('node:assert/strict');
+const root=fs.readFileSync('AGENTS.md','utf8');
+const skill=fs.readFileSync('.agents/skills/psi-ai-company/SKILL.md','utf8');
+const alias=fs.readFileSync('skills/psi-ai-company/SKILL.md','utf8');
+const profile=fs.readFileSync('docs/psi-ai-company/PRODUCT_PROFILE.md','utf8');
+assert.equal(skill,alias,'Canonical skill and compatibility copy must match');
+assert.match(skill,/^---\\nname: psi-ai-company\\ndescription: .+\\n/s,'Agent Skills frontmatter required');
+assert.match(root,/\\.agents\\/skills\\/psi-ai-company\\/SKILL\\.md/,'AGENTS must point to discovery path');
+assert.match(profile,/TELLOWSS\/SMART-SIGN-PRO/,'Correct source repository required');
+assert.match(profile,/smart-sign-pro/,'Correct Vercel project required');
+for(const name of ['아틀라스','나비','루미','코어','세이프','키퍼','프루프'])assert.ok(skill.includes(name),'Missing role: '+name);
+console.log('PSI AI STUDIO skill: PASS, 7 named roles, unique product mapping, discovered SKILL.md');
