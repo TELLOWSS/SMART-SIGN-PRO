@@ -1,5 +1,6 @@
 import ExcelJS from 'exceljs';
 import * as XLSX from 'xlsx';
+import JSZip from 'jszip';
 
 /**
  * 엑셀 열 문자를 숫자로 변환 (A=1, B=2, ..., Z=26, AA=27, etc.)
@@ -168,8 +169,54 @@ export const parsePrintAreaBounds = (
 };
 
 /**
+ * 엑셀 워크시트에서 유령 행(Ghost Rows, 예: 104만 행 근처)을 사전 제거
+ * - 현장 파일에서 흔히 발생하는 최대 행 부근(1,048,572행)의 더미 셀로 인한
+ *   브라우저 메모리 폭증(OOM) 및 ExcelJS 로드 지연/실패를 선제 차단한다.
+ * - 실제 서식 및 대우건설 로고 등 미디어는 100% 온전히 보존된다.
+ */
+export const stripGhostRowsFromBuffer = async (
+  buffer: ArrayBuffer,
+  maxRow: number = 1000
+): Promise<ArrayBuffer> => {
+  try {
+    const zip = await JSZip.loadAsync(buffer);
+    let modified = false;
+
+    for (const filename of Object.keys(zip.files)) {
+      if (filename.startsWith('xl/worksheets/sheet') && filename.endsWith('.xml') && !filename.includes('_rels')) {
+        let sheetXml = await zip.file(filename)!.async('string');
+        let hasGhost = false;
+
+        const cleanedXml = sheetXml.replace(/<row r="(\d+)"[^>]*>[\s\S]*?<\/row>/g, (m, r) => {
+          if (parseInt(r, 10) > maxRow) {
+            hasGhost = true;
+            return '';
+          }
+          return m;
+        });
+
+        if (hasGhost) {
+          zip.file(filename, cleanedXml);
+          modified = true;
+        }
+      }
+    }
+
+    if (modified) {
+      console.log(`[stripGhostRowsFromBuffer] 유령 행(>${maxRow}) 선제 제거 완료`);
+      return await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' });
+    }
+    return buffer;
+  } catch (err) {
+    console.warn('[stripGhostRowsFromBuffer] 유령 행 전처리 스킵 (원본 유지):', err);
+    return buffer;
+  }
+};
+
+/**
  * ExcelJS 워크북을 안전하게 로드
- * - 1차: 원본 ArrayBuffer를 ExcelJS로 직접 로드 (모든 서식/스타일 완벽 보존)
+ * - 0차: 유령 행(104만 행) 사전 제거로 브라우저 메모리 폭증 방지 및 ExcelJS 로드 보장
+ * - 1차: 원본 ArrayBuffer를 ExcelJS로 직접 로드 (모든 서식/스타일/로고 완벽 보존)
  * - 2차: ExcelJS 실패 시(구형 .xls, HTML 테이블, 특수 태그 등) SheetJS로 자동 복구 및 표준 .xlsx 변환 후 로드
  */
 export const loadWorkbookSafely = async (
@@ -179,10 +226,13 @@ export const loadWorkbookSafely = async (
     throw new Error("파일 버퍼가 비어있습니다.");
   }
 
+  // 104만 행 등 비정상 유령 행 사전 제거 (스타일 및 로고 100% 보존)
+  const cleanBuffer = await stripGhostRowsFromBuffer(buffer, 1000);
+
   try {
     const wb = new ExcelJS.Workbook();
-    await wb.xlsx.load(buffer);
-    return { workbook: wb, normalizedBuffer: buffer, isTranscoded: false };
+    await wb.xlsx.load(cleanBuffer);
+    return { workbook: wb, normalizedBuffer: cleanBuffer, isTranscoded: false };
   } catch (excelErr) {
     console.warn("[loadWorkbookSafely] ExcelJS 직접 로드 실패, SheetJS 호환 모드로 복구 시도:", excelErr);
 
