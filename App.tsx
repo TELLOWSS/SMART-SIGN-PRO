@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Upload, FileSpreadsheet, Image as ImageIcon, CheckCircle, RotateCcw, Download, Settings, RefreshCw, AlertCircle, HelpCircle, X, ArrowRight, FileText, MousePointer2, Copy, FileDown } from 'lucide-react';
+import { Upload, FileSpreadsheet, Image as ImageIcon, CheckCircle, RotateCcw, Download, Settings, RefreshCw, AlertCircle, HelpCircle, X, ArrowRight, FileText, MousePointer2, Copy, FileDown, FolderUp } from 'lucide-react';
 import { parseExcelFile, autoMatchSignatures, generateFinalExcel, normalizeName } from './services/excelService';
 import { buildSheetPreviewModel, exportToPDF, exportToPNG, SheetPreviewModel } from './services/alternativeExportService';
+import { extractFilesFromDataTransfer } from './services/excelUtils';
 import { AppState, SignatureFile, SheetData, SignatureAssignment } from './types';
 import SignatureWorkspace from './components/SignatureWorkspace';
 import { buildBatchExcelZip, BatchExportProgress } from './services/batchExportService';
@@ -35,6 +36,29 @@ export default function App() {
   // Refs to clear file inputs
   const excelInputRef = useRef<HTMLInputElement>(null);
   const sigInputRef = useRef<HTMLInputElement>(null);
+  const sigFolderInputRef = useRef<HTMLInputElement>(null);
+
+  // Drag and Drop 상태
+  const [isDraggingExcel, setIsDraggingExcel] = useState(false);
+  const [isDraggingSig, setIsDraggingSig] = useState(false);
+
+  // 브라우저 기본 드래그 방지 (바탕화면/탐색기에서 파일/폴더 드롭 시 새 창 열림/이탈 방지)
+  useEffect(() => {
+    const handleDragOver = (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    const handleDrop = (e: DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    window.addEventListener('dragover', handleDragOver);
+    window.addEventListener('drop', handleDrop);
+    return () => {
+      window.removeEventListener('dragover', handleDragOver);
+      window.removeEventListener('drop', handleDrop);
+    };
+  }, []);
 
   // Auto-hide toast
   useEffect(() => {
@@ -157,8 +181,7 @@ export default function App() {
 
   // --- Handlers ---
 
-  const handleExcelUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+  const processExcelFile = async (file: File) => {
     if (!file) return;
 
     // Validate file type (지원 형식: .xlsx, .xls, .csv, .xlsm, .xlsb)
@@ -211,36 +234,44 @@ export default function App() {
     }
   };
 
-  const handleSignatureUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
+  const handleExcelUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    await processExcelFile(file);
+  };
+
+  const processSignatureFiles = async (files: File[] | FileList) => {
+    const fileArray = Array.from(files);
+    if (!fileArray || fileArray.length === 0) return;
 
     setProcessing(true);
     const newSignatures = new Map<string, SignatureFile[]>(state.signatures);
     let count = 0;
     const failedFiles: string[] = [];
 
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
+    for (let i = 0; i < fileArray.length; i++) {
+      const file = fileArray[i];
+
+      // 숨김 파일 또는 시스템 파일 건너뛰기
+      if (file.name.startsWith('.') || file.name === 'Thumbs.db' || file.name === 'desktop.ini') {
+        continue;
+      }
+
       let objectUrl: string | null = null;
-      // Only images
-      if (!file.type.startsWith('image/')) {
+      // Only images (MIME check or extension check)
+      const isImg = file.type.startsWith('image/') || /\.(png|jpe?g|webp|bmp|gif|tif|tiff)$/i.test(file.name);
+      if (!isImg) {
         failedFiles.push(`${file.name} (이미지 파일이 아님)`);
         continue;
       }
 
-      // File size check (warning if > 2MB per image)
-      if (file.size > 2 * 1024 * 1024) {
-        failedFiles.push(`${file.name} (2MB 초과 - 압축 권장)`);
+      // File size check (warning if > 5MB per image)
+      if (file.size > 5 * 1024 * 1024) {
+        failedFiles.push(`${file.name} (5MB 초과 - 용량 과다)`);
         continue;
       }
 
       try {
-        /**
-         * 메모리 최적화:
-         * - 우선 createImageBitmap으로 크기를 읽어 브라우저 디코더 리소스를 즉시 해제한다.
-         * - fallback 경로에서는 임시 Object URL을 만들고 즉시 revoke 한다.
-         */
         const getImageDims = async (): Promise<{ w: number; h: number }> => {
           if ('createImageBitmap' in window) {
             try {
@@ -331,12 +362,25 @@ export default function App() {
     setState(prev => ({ ...prev, signatures: newSignatures }));
     setProcessing(false);
     if (sigInputRef.current) sigInputRef.current.value = '';
+    if (sigFolderInputRef.current) sigFolderInputRef.current.value = '';
     
     const toastMsg = failedFiles.length > 0 
       ? `${count}개 추가됨${failedFiles.length > 0 ? ` (${failedFiles.length}개 제외됨: ${failedFiles.slice(0, 2).join(', ')}${failedFiles.length > 2 ? '...' : ''})` : ''}`
       : `${count}개의 서명이 추가되었습니다.`;
     
     setToast({ msg: toastMsg, type: count > 0 ? 'success' : 'info' });
+  };
+
+  const handleSignatureUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    await processSignatureFiles(files);
+  };
+
+  const handleFolderUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    await processSignatureFiles(files);
   };
 
   const runAutoMatch = () => {
@@ -619,6 +663,7 @@ export default function App() {
 
     if (excelInputRef.current) excelInputRef.current.value = '';
     if (sigInputRef.current) sigInputRef.current.value = '';
+    if (sigFolderInputRef.current) sigFolderInputRef.current.value = '';
   };
 
   const handleReset = () => {
@@ -635,14 +680,55 @@ export default function App() {
 
   const renderUploadStep = () => (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-8 w-full max-w-4xl mx-auto mt-10 px-4">
-      {/* Excel Upload Card */}
-      <div className={`bg-white p-8 rounded-2xl shadow-lg border-2 ${state.excelFile ? 'border-green-500' : 'border-gray-100'}`}>
+      {/* Excel Upload Card (Drag & Drop 지원) */}
+      <div 
+        onDragOver={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!isDraggingExcel) setIsDraggingExcel(true);
+        }}
+        onDragEnter={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setIsDraggingExcel(true);
+        }}
+        onDragLeave={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+            setIsDraggingExcel(false);
+          }
+        }}
+        onDrop={async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setIsDraggingExcel(false);
+          const files = await extractFilesFromDataTransfer(e.dataTransfer);
+          const excelFile = files.find(f => /\.(xlsx|xls|csv|xlsm|xlsb)$/i.test(f.name));
+          if (excelFile) {
+            await processExcelFile(excelFile);
+          } else if (files.length > 0 && files.some(f => f.type.startsWith('image/') || /\.(png|jpe?g|webp|bmp)$/i.test(f.name))) {
+            setToast({ msg: '서명 이미지를 감지했습니다. 오른쪽 2번 서명 이미지 카드에 넣어주세요.', type: 'info' });
+          } else {
+            setError('엑셀 파일(.xlsx, .xls)을 끌어다 놓아주세요.');
+          }
+        }}
+        className={`relative bg-white p-8 rounded-2xl shadow-lg border-2 transition-all duration-200 ${
+          isDraggingExcel 
+            ? 'border-blue-500 bg-blue-50/70 scale-[1.02] ring-4 ring-blue-100' 
+            : state.excelFile 
+              ? 'border-green-500' 
+              : 'border-gray-100 hover:border-blue-300'
+        }`}
+      >
         <div className="flex flex-col items-center text-center space-y-4">
-          <div className={`p-4 rounded-full ${state.excelFile ? 'bg-green-100 text-green-600' : 'bg-blue-50 text-blue-600'}`}>
+          <div className={`p-4 rounded-full transition-transform ${isDraggingExcel ? 'scale-110' : ''} ${state.excelFile ? 'bg-green-100 text-green-600' : 'bg-blue-50 text-blue-600'}`}>
             <FileSpreadsheet size={48} />
           </div>
           <h3 className="text-xl font-bold text-gray-800">1. 엑셀 양식 업로드</h3>
-          <p className="text-gray-500 text-sm">'성명'과 '1' 표시가 포함된 안전관리비/보호구 지급대장 엑셀 파일(.xlsx, .xls)을 업로드하세요.</p>
+          <p className="text-gray-500 text-sm">
+            '성명'과 '1' 표시가 포함된 안전관리비/보호구 지급대장 엑셀 파일(.xlsx, .xls)을 업로드하세요.
+          </p>
           
           <label className="cursor-pointer bg-gray-900 text-white px-6 py-3 rounded-lg hover:bg-gray-800 transition-colors w-full">
             <span className="flex items-center justify-center gap-2">
@@ -658,6 +744,13 @@ export default function App() {
               onChange={handleExcelUpload} 
             />
           </label>
+
+          {/* Drag & Drop 유도 영역 */}
+          <div className={`w-full py-2.5 px-3 border border-dashed rounded-lg text-xs font-medium transition-colors ${
+            isDraggingExcel ? 'border-blue-500 text-blue-700 bg-blue-100/60' : 'border-gray-200 text-gray-500 bg-gray-50'
+          }`}>
+            {isDraggingExcel ? '🚀 여기에 엑셀 파일을 놓으세요!' : '🖱️ 탐색기에서 엑셀 파일을 여기로 끌어다 놓으셔도 됩니다.'}
+          </div>
           
           {state.excelFile && (
             <div className="flex items-center gap-2 text-green-600 text-sm font-medium">
@@ -668,30 +761,102 @@ export default function App() {
         </div>
       </div>
 
-      {/* Signature Upload Card */}
-      <div className={`bg-white p-8 rounded-2xl shadow-lg border-2 ${state.signatures.size > 0 ? 'border-green-500' : 'border-gray-100'}`}>
+      {/* Signature Upload Card (Drag & Drop + 폴더 지원) */}
+      <div 
+        onDragOver={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!isDraggingSig) setIsDraggingSig(true);
+        }}
+        onDragEnter={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setIsDraggingSig(true);
+        }}
+        onDragLeave={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+            setIsDraggingSig(false);
+          }
+        }}
+        onDrop={async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setIsDraggingSig(false);
+          const files = await extractFilesFromDataTransfer(e.dataTransfer);
+          
+          const excelFile = files.find(f => /\.(xlsx|xls|csv|xlsm|xlsb)$/i.test(f.name));
+          if (excelFile && files.length === 1) {
+            setToast({ msg: '엑셀 파일을 감지했습니다. 왼쪽 1번 엑셀 양식 카드에 넣어주세요.', type: 'info' });
+            return;
+          }
+
+          if (files.length === 0) {
+            setError('폴더가 비어있거나 읽을 수 있는 이미지 파일이 없습니다.');
+            return;
+          }
+
+          await processSignatureFiles(files);
+        }}
+        className={`relative bg-white p-8 rounded-2xl shadow-lg border-2 transition-all duration-200 ${
+          isDraggingSig 
+            ? 'border-purple-500 bg-purple-50/70 scale-[1.02] ring-4 ring-purple-100' 
+            : state.signatures.size > 0 
+              ? 'border-green-500' 
+              : 'border-gray-100 hover:border-purple-300'
+        }`}
+      >
         <div className="flex flex-col items-center text-center space-y-4">
-          <div className={`p-4 rounded-full ${state.signatures.size > 0 ? 'bg-green-100 text-green-600' : 'bg-purple-50 text-purple-600'}`}>
+          <div className={`p-4 rounded-full transition-transform ${isDraggingSig ? 'scale-110' : ''} ${state.signatures.size > 0 ? 'bg-green-100 text-green-600' : 'bg-purple-50 text-purple-600'}`}>
             <ImageIcon size={48} />
           </div>
-          <h3 className="text-xl font-bold text-gray-800">2. 서명 이미지 업로드</h3>
-          <p className="text-gray-500 text-sm">모든 수기 서명 이미지 파일을 업로드하세요 (예: 홍길동_1.png).</p>
+          <h3 className="text-xl font-bold text-gray-800">2. 서명 이미지 / 폴더 업로드</h3>
+          <p className="text-gray-500 text-sm">
+            수기 서명 이미지 파일(예: 홍길동_1.png) 또는 <strong>서명 폴더를 통째로</strong> 추가하세요.
+          </p>
           
-          <label className="cursor-pointer bg-gray-900 text-white px-6 py-3 rounded-lg hover:bg-gray-800 transition-colors w-full">
-            <span className="flex items-center justify-center gap-2">
-              <Upload size={18} />
-              이미지 추가
-            </span>
-            <input 
-              key={`sig-input-${state.step}`} // Force reset input when step changes
-              ref={sigInputRef}
-              type="file" 
-              accept="image/*" 
-              multiple 
-              className="hidden" 
-              onChange={handleSignatureUpload} 
-            />
-          </label>
+          {/* 개별 파일 추가 & 폴더 통째로 선택 버튼 그룹 */}
+          <div className="grid grid-cols-2 gap-2 w-full">
+            <label className="cursor-pointer bg-gray-900 text-white px-3 py-3 rounded-lg hover:bg-gray-800 transition-colors text-center">
+              <span className="flex items-center justify-center gap-1.5 text-sm font-medium">
+                <Upload size={16} />
+                이미지 파일
+              </span>
+              <input 
+                key={`sig-input-${state.step}`} // Force reset input when step changes
+                ref={sigInputRef}
+                type="file" 
+                accept="image/*" 
+                multiple 
+                className="hidden" 
+                onChange={handleSignatureUpload} 
+              />
+            </label>
+
+            <label className="cursor-pointer bg-purple-700 text-white px-3 py-3 rounded-lg hover:bg-purple-800 transition-colors text-center">
+              <span className="flex items-center justify-center gap-1.5 text-sm font-medium">
+                <FolderUp size={16} />
+                폴더 통째로
+              </span>
+              <input 
+                key={`sig-folder-input-${state.step}`}
+                ref={sigFolderInputRef}
+                type="file" 
+                {...({ webkitdirectory: "", directory: "" } as any)}
+                multiple 
+                className="hidden" 
+                onChange={handleFolderUpload} 
+              />
+            </label>
+          </div>
+
+          {/* Drag & Drop 유도 영역 */}
+          <div className={`w-full py-2.5 px-3 border border-dashed rounded-lg text-xs font-medium transition-colors ${
+            isDraggingSig ? 'border-purple-500 text-purple-700 bg-purple-100/60' : 'border-gray-200 text-gray-500 bg-gray-50'
+          }`}>
+            {isDraggingSig ? '🚀 여기에 서명 폴더나 이미지들을 놓으세요!' : '📁 탐색기에서 서명 폴더를 통째로 여기로 끌어다 놓으셔도 됩니다.'}
+          </div>
           
           {state.signatures.size > 0 && (
             <div className="flex items-center gap-2 text-green-600 text-sm font-medium">

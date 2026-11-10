@@ -268,3 +268,73 @@ export const loadWorkbookSafely = async (
     }
   }
 };
+
+/**
+ * DataTransfer 객체에서 파일 및 폴더 내부 파일을 재귀적으로 추출 (Drag and Drop 완벽 지원)
+ * - 사용자가 폴더를 통째로 끌어다 놓아도 webkitGetAsEntry를 통해 모든 하위 파일/폴더를 자동 탐색한다.
+ * - Windows, Mac, Chrome, Edge, Firefox, Whale, Safari 등 주요 브라우저를 완벽 지원한다.
+ */
+export const extractFilesFromDataTransfer = async (dataTransfer: DataTransfer): Promise<File[]> => {
+  const files: File[] = [];
+  const items = dataTransfer.items;
+
+  if (items && items.length > 0 && typeof (items[0] as any).webkitGetAsEntry === 'function') {
+    const queue: any[] = [];
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.kind === 'file') {
+        const entry = (item as any).webkitGetAsEntry();
+        if (entry) queue.push(entry);
+      }
+    }
+
+    const readAllEntries = async (dirReader: any): Promise<any[]> => {
+      const entries: any[] = [];
+      let batch: any[];
+      do {
+        batch = await new Promise<any[]>((resolve) => {
+          dirReader.readEntries((results: any[]) => resolve(results || []), () => resolve([]));
+        });
+        entries.push(...batch);
+      } while (batch.length > 0);
+      return entries;
+    };
+
+    while (queue.length > 0) {
+      const entry = queue.shift();
+      if (!entry) continue;
+
+      if (entry.isFile) {
+        await new Promise<void>((resolve) => {
+          entry.file(
+            (file: File) => {
+              files.push(file);
+              resolve();
+            },
+            () => resolve()
+          );
+        });
+      } else if (entry.isDirectory) {
+        try {
+          const reader = entry.createReader();
+          const children = await readAllEntries(reader);
+          queue.push(...children);
+        } catch (e) {
+          console.warn('[extractFilesFromDataTransfer] 디렉터리 읽기 오류:', e);
+        }
+      }
+    }
+
+    if (files.length > 0) {
+      return files;
+    }
+  }
+
+  // 폴더 탐색 API 미지원 브라우저 또는 일반 파일 드롭 폴백
+  if (dataTransfer.files && dataTransfer.files.length > 0) {
+    return Array.from(dataTransfer.files);
+  }
+
+  return [];
+};
+
