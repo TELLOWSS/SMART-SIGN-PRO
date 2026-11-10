@@ -1,5 +1,6 @@
 import ExcelJS from 'exceljs';
 import * as XLSX from 'xlsx';
+import JSZip from 'jszip';
 import { SheetData, RowData, CellData, SignatureFile, SignatureAssignment, ParseExcelResult } from '../types';
 import { columnNumberToLetter, parseCellAddress, isSignaturePlaceholder, randomInt, randomFloat, parsePrintAreaBounds, loadWorkbookSafely } from './excelUtils';
 
@@ -735,6 +736,56 @@ const validateWorksheetPreservation = (
 };
 
 /**
+ * ExcelJS가 생성한 XLSX ArrayBuffer를 OpenXML 표준 및 Microsoft Excel 무결성 요구사항에 맞게 사후 보정
+ * 1. sheetFormatPr에 필수 속성인 defaultRowHeight 누락 방지 (Excel 복구 대화상자의 핵심 원인 해결)
+ * 2. drawing XML의 a16:creationId 중복 GUID를 고유 GUID로 변환 (다중 이미지 시 Excel 충돌 방지)
+ */
+export const sanitizeGeneratedWorkbookBuffer = async (buffer: ArrayBuffer): Promise<ArrayBuffer> => {
+  try {
+    const zip = await JSZip.loadAsync(buffer);
+    let modified = false;
+
+    // 1. 모든 워크시트 XML의 sheetFormatPr 보정
+    for (const filename of Object.keys(zip.files)) {
+      if (filename.startsWith('xl/worksheets/sheet') && filename.endsWith('.xml')) {
+        let sheetXml = await zip.file(filename)!.async('string');
+        if (sheetXml.includes('<sheetFormatPr') && !sheetXml.includes('defaultRowHeight=')) {
+          sheetXml = sheetXml.replace('<sheetFormatPr', '<sheetFormatPr defaultRowHeight="15"');
+          zip.file(filename, sheetXml);
+          modified = true;
+        }
+      }
+    }
+
+    // 2. 모든 드로잉 XML의 a16:creationId 중복 GUID 고유화
+    for (const filename of Object.keys(zip.files)) {
+      if (filename.startsWith('xl/drawings/drawing') && filename.endsWith('.xml')) {
+        let drawXml = await zip.file(filename)!.async('string');
+        let counter = 1;
+        if (drawXml.includes('id="{00000000-0008-0000-0000-000002000000}"')) {
+          drawXml = drawXml.replace(/id="\{00000000-0008-0000-0000-000002000000\}"/g, () => {
+            const hex = (counter++).toString(16).padStart(12, '0');
+            return `id="{00000000-0008-0000-0000-${hex}}"`;
+          });
+          zip.file(filename, drawXml);
+          modified = true;
+        }
+      }
+    }
+
+    if (modified) {
+      console.log('[sanitizeGeneratedWorkbookBuffer] XLSX 무결성 사후 보정 완료 (defaultRowHeight 및 고유 creationId 적용)');
+      const sanitized = await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' });
+      return sanitized;
+    }
+    return buffer;
+  } catch (err) {
+    console.warn('[sanitizeGeneratedWorkbookBuffer] 버퍼 사후 보정 중 경고 (원본 버퍼 유지):', err);
+    return buffer;
+  }
+};
+
+/**
  * 최종 엑셀 생성 - 원본 파일 구조 완벽 보존
  * 
  * 전략:
@@ -1305,7 +1356,15 @@ export const generateFinalExcel = async (
       console.warn(`[정리 경고] 내부 상태 검사 실패`, e);
     }
 
-    const buffer = await workbook.xlsx.writeBuffer();
+    // 저장 전 워크시트 기본 행 높이 보장 (Excel 필수 속성)
+    for (const sheet of workbook.worksheets) {
+      if (!sheet.properties.defaultRowHeight) {
+        sheet.properties.defaultRowHeight = 15;
+      }
+    }
+
+    const rawBuffer = await workbook.xlsx.writeBuffer();
+    const buffer = await sanitizeGeneratedWorkbookBuffer(rawBuffer);
 
     if (!buffer || buffer.byteLength === 0) {
       throw new Error("버퍼 생성 실패 - 빈 파일");
