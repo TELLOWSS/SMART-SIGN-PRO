@@ -5,7 +5,7 @@ const skill=fs.readFileSync('.agents/skills/psi-ai-company/SKILL.md','utf8');
 const alias=fs.readFileSync('skills/psi-ai-company/SKILL.md','utf8');
 const profile=fs.readFileSync('docs/psi-ai-company/PRODUCT_PROFILE.md','utf8');
 assert.equal(skill,alias,'Canonical skill and compatibility copy must match');
-const lines=skill.split(String.fromCharCode(10));
+const lines=skill.replace(/\r/g, '').split('\n');
 assert.equal(lines[0],'---','YAML frontmatter start missing');
 assert.equal(lines[1],'name: psi-ai-company','Skill ID mismatch');
 assert.ok(lines[2].startsWith('description: '),'Skill description missing');

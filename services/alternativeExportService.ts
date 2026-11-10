@@ -2,7 +2,7 @@ import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 import ExcelJS from 'exceljs';
 import { SignatureAssignment, SignatureFile } from '../types';
-import { columnLetterToNumber, isSignaturePlaceholder, parsePrintAreaBounds } from './excelUtils';
+import { columnLetterToNumber, isSignaturePlaceholder, parsePrintAreaBounds, loadWorkbookSafely } from './excelUtils';
 
 export interface PreviewCellModel {
   key: string;
@@ -64,18 +64,14 @@ export const buildSheetPreviewModel = async (
   originalBuffer: ArrayBuffer,
   assignments: Map<string, SignatureAssignment>,
   signaturesMap: Map<string, SignatureFile[]>,
-  printAreaOnly: boolean = true,
-  worksheetIndex: number = 0
+  printAreaOnly: boolean = true
 ): Promise<SheetPreviewModel> => {
-  const workbook = new ExcelJS.Workbook();
-  await workbook.xlsx.load(originalBuffer);
+  const { workbook } = await loadWorkbookSafely(originalBuffer);
 
-  const worksheet = workbook.worksheets[worksheetIndex] || workbook.worksheets[0];
+  const worksheet = workbook.worksheets[0];
   if (!worksheet) {
     throw new Error('워크시트를 찾을 수 없습니다.');
   }
-
-  const resolvedWorksheetIndex = workbook.worksheets.indexOf(worksheet);
 
   const originalPrintArea = worksheet.pageSetup?.printArea;
   let printAreaRows = { start: 1, end: worksheet.actualRowCount || 100 };
@@ -147,8 +143,7 @@ export const buildSheetPreviewModel = async (
         }
       }
 
-      const scopedKey = `s${resolvedWorksheetIndex}:${cellKey}`;
-      const assignment = assignments.get(scopedKey) || assignments.get(cellKey);
+      const assignment = assignments.get(cellKey);
       let signature: PreviewCellModel['signature'];
 
       if (assignment) {

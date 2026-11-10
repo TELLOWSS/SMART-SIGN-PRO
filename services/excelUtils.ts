@@ -1,3 +1,6 @@
+import ExcelJS from 'exceljs';
+import * as XLSX from 'xlsx';
+
 /**
  * 엑셀 열 문자를 숫자로 변환 (A=1, B=2, ..., Z=26, AA=27, etc.)
  */
@@ -161,5 +164,57 @@ export const parsePrintAreaBounds = (
     };
   } catch {
     return fallback;
+  }
+};
+
+/**
+ * ExcelJS 워크북을 안전하게 로드
+ * - 1차: 원본 ArrayBuffer를 ExcelJS로 직접 로드 (모든 서식/스타일 완벽 보존)
+ * - 2차: ExcelJS 실패 시(구형 .xls, HTML 테이블, 특수 태그 등) SheetJS로 자동 복구 및 표준 .xlsx 변환 후 로드
+ */
+export const loadWorkbookSafely = async (
+  buffer: ArrayBuffer
+): Promise<{ workbook: ExcelJS.Workbook; normalizedBuffer: ArrayBuffer; isTranscoded: boolean }> => {
+  if (!buffer || buffer.byteLength === 0) {
+    throw new Error("파일 버퍼가 비어있습니다.");
+  }
+
+  try {
+    const wb = new ExcelJS.Workbook();
+    await wb.xlsx.load(buffer);
+    return { workbook: wb, normalizedBuffer: buffer, isTranscoded: false };
+  } catch (excelErr) {
+    console.warn("[loadWorkbookSafely] ExcelJS 직접 로드 실패, SheetJS 호환 모드로 복구 시도:", excelErr);
+
+    try {
+      const u8 = new Uint8Array(buffer);
+      const sheetJsWb = XLSX.read(u8, {
+        type: 'array',
+        cellDates: true,
+        cellStyles: true,
+      });
+
+      if (!sheetJsWb.SheetNames || sheetJsWb.SheetNames.length === 0) {
+        throw new Error("파일 내에 워크시트가 존재하지 않습니다.");
+      }
+
+      const cleanXlsxData = XLSX.write(sheetJsWb, {
+        type: 'array',
+        bookType: 'xlsx',
+      });
+      const cleanArrayBuffer = cleanXlsxData instanceof Uint8Array ? cleanXlsxData.buffer : cleanXlsxData;
+
+      const wb = new ExcelJS.Workbook();
+      await wb.xlsx.load(cleanArrayBuffer);
+      return { workbook: wb, normalizedBuffer: cleanArrayBuffer, isTranscoded: true };
+    } catch (sheetJsErr) {
+      const originalMsg = excelErr instanceof Error ? excelErr.message : String(excelErr);
+      const sheetJsMsg = sheetJsErr instanceof Error ? sheetJsErr.message : String(sheetJsErr);
+      throw new Error(
+        `파일을 읽을 수 없습니다.\n` +
+        `- 상세 사유: ${originalMsg || sheetJsMsg}\n` +
+        `암호로 보호된 파일이거나 파일 형식이 손상되었을 수 있습니다. Excel 프로그램에서 열어 '다른 이름으로 저장(XLSX)' 후 다시 시도해주세요.`
+      );
+    }
   }
 };

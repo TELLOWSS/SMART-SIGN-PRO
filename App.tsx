@@ -113,8 +113,7 @@ export default function App() {
           state.excelBuffer as ArrayBuffer,
           state.assignments,
           state.signatures,
-          false,
-          state.sheetData?.sheetIndex ?? 0
+          true
         );
 
         if (!canceled) {
@@ -162,16 +161,19 @@ export default function App() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    // Validate file type
-    if (!file.name.endsWith('.xlsx') && !file.type.includes('spreadsheet')) {
-      setError("XLSX 파일만 지원합니다. 파일 확장명을 확인해주세요.");
+    // Validate file type (지원 형식: .xlsx, .xls, .csv, .xlsm, .xlsb)
+    const isSupportedExtension = /\.(xlsx|xls|csv|xlsm|xlsb)$/i.test(file.name);
+    const isSupportedMime = file.type.includes('spreadsheet') || file.type.includes('excel') || file.type.includes('csv') || file.type === '';
+
+    if (!isSupportedExtension && !isSupportedMime) {
+      setError("엑셀 파일(.xlsx, .xls, .csv)만 지원합니다. 파일 확장명을 확인해주세요.");
       if (excelInputRef.current) excelInputRef.current.value = '';
       return;
     }
 
-    // Check file size (Warning if > 5MB)
-    if (file.size > 5 * 1024 * 1024) {
-      if (!window.confirm(`선택하신 엑셀 파일의 용량이 큽니다 (${(file.size / 1024 / 1024).toFixed(1)}MB).\n파일 내에 이미지가 많거나 행이 매우 많으면 'Out of Memory' 오류가 발생할 수 있습니다.\n\n계속 진행하시겠습니까?`)) {
+    // Check file size (Warning if > 15MB)
+    if (file.size > 15 * 1024 * 1024) {
+      if (!window.confirm(`선택하신 엑셀 파일의 용량이 큽니다 (${(file.size / 1024 / 1024).toFixed(1)}MB).\n파일 내에 이미지가 많거나 행이 매우 많으면 브라우저 메모리 부하가 발생할 수 있습니다.\n\n계속 진행하시겠습니까?`)) {
         if (excelInputRef.current) excelInputRef.current.value = '';
         return;
       }
@@ -186,14 +188,20 @@ export default function App() {
         throw new Error("파일이 비어있습니다.");
       }
 
-      const sheetData = await parseExcelFile(buffer);
+      const parseResult = await parseExcelFile(buffer, file.name);
+      const sheetData = parseResult;
+      const normalizedBuffer = parseResult.normalizedBuffer || buffer;
       
       if (sheetData.rows.length === 0) {
         throw new Error("데이터가 없는 파일입니다. 성명 열과 데이터가 포함된 파일을 확인해주세요.");
       }
 
-      setState(prev => ({ ...prev, excelFile: file, excelBuffer: buffer, sheetData, step: 'upload' }));
-      setToast({ msg: `${file.name} 로드됨 (${sheetData.rows.length}개 행)`, type: 'success' });
+      setState(prev => ({ ...prev, excelFile: file, excelBuffer: normalizedBuffer, sheetData, step: 'upload' }));
+      if (parseResult.isTranscoded) {
+        setToast({ msg: `${file.name} 호환 모드로 자동 변환 로드됨 (${sheetData.rows.length}개 행)`, type: 'success' });
+      } else {
+        setToast({ msg: `${file.name} 로드됨 (${sheetData.rows.length}개 행)`, type: 'success' });
+      }
     } catch (err) {
       const errorMsg = err instanceof Error ? err.message : "알 수 없는 오류";
       setError(`엑셀 파일 읽기 실패: ${errorMsg}`);
@@ -634,7 +642,7 @@ export default function App() {
             <FileSpreadsheet size={48} />
           </div>
           <h3 className="text-xl font-bold text-gray-800">1. 엑셀 양식 업로드</h3>
-          <p className="text-gray-500 text-sm">'성명'과 '1' 표시가 포함된 안전관리비/보호구 지급대장 엑셀 파일을 업로드하세요.</p>
+          <p className="text-gray-500 text-sm">'성명'과 '1' 표시가 포함된 안전관리비/보호구 지급대장 엑셀 파일(.xlsx, .xls)을 업로드하세요.</p>
           
           <label className="cursor-pointer bg-gray-900 text-white px-6 py-3 rounded-lg hover:bg-gray-800 transition-colors w-full">
             <span className="flex items-center justify-center gap-2">
@@ -645,7 +653,7 @@ export default function App() {
               key={`excel-input-${state.step}`} // Force reset input when step changes
               ref={excelInputRef}
               type="file" 
-              accept=".xlsx" 
+              accept=".xlsx,.xls,.csv,.xlsm,.xlsb,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" 
               className="hidden" 
               onChange={handleExcelUpload} 
             />
