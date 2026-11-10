@@ -28,6 +28,20 @@ export interface SheetData {
 export interface ParseExcelResult extends SheetData {
   normalizedBuffer?: ArrayBuffer;
   isTranscoded?: boolean;
+  sheetNames?: string[];
+  activeSheetIndex?: number;
+}
+
+export interface WorkerMatchItem {
+  rowNumber: number;
+  workerName: string;
+  jobTitle?: string;
+  affiliation?: string;
+  residentNumber?: string;
+  placeholderCells: { row: number; col: number; address: string }[];
+  assignedVariantId?: string;
+  assignedSignatureName?: string;
+  isMatched: boolean;
 }
 
 export interface SignatureAssignment {
@@ -48,4 +62,8 @@ export interface AppState {
   sheetData: SheetData | null;
   signatures: Map<string, SignatureFile[]>; // Map "HongGilDong" -> [File1, File2]
   assignments: Map<string, SignatureAssignment>; // Map "Row:Col" -> Assignment
+  availableSheets: string[];
+  activeSheetIndex: number;
+  maskResidentNumber: boolean;
+  signatureScalePreset: number;
 }

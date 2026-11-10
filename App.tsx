@@ -1,10 +1,12 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Upload, FileSpreadsheet, Image as ImageIcon, CheckCircle, RotateCcw, Download, Settings, RefreshCw, AlertCircle, HelpCircle, X, ArrowRight, FileText, MousePointer2, Copy, FileDown, FolderUp } from 'lucide-react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { Upload, FileSpreadsheet, Image as ImageIcon, CheckCircle, RotateCcw, Download, Settings, RefreshCw, AlertCircle, HelpCircle, X, ArrowRight, FileText, MousePointer2, Copy, FileDown, FolderUp, PenTool, Users, ShieldCheck } from 'lucide-react';
 import { parseExcelFile, autoMatchSignatures, generateFinalExcel, normalizeName } from './services/excelService';
 import { buildSheetPreviewModel, exportToPDF, exportToPNG, SheetPreviewModel } from './services/alternativeExportService';
-import { extractFilesFromDataTransfer } from './services/excelUtils';
+import { extractFilesFromDataTransfer, extractWorkerRowsFromSheet } from './services/excelUtils';
 import { AppState, SignatureFile, SheetData, SignatureAssignment } from './types';
 import SignatureWorkspace from './components/SignatureWorkspace';
+import SignaturePadModal from './components/SignaturePadModal';
+import ManualMatchModal from './components/ManualMatchModal';
 import { buildBatchExcelZip, BatchExportProgress } from './services/batchExportService';
 
 // Factory function to ensure fresh state on reset
@@ -15,6 +17,10 @@ const getInitialState = (): AppState => ({
   sheetData: null,
   signatures: new Map(),
   assignments: new Map(),
+  availableSheets: [],
+  activeSheetIndex: 0,
+  maskResidentNumber: false,
+  signatureScalePreset: 1.0,
 });
 
 export default function App() {
@@ -32,6 +38,11 @@ export default function App() {
   const signaturesRef = useRef<Map<string, SignatureFile[]>>(new Map());
   const batchAbortRef = useRef<AbortController | null>(null);
   const objectUrlRegistryRef = useRef<Set<string>>(new Set());
+
+  // 5대 실무 기능 모달 상태
+  const [isSignaturePadOpen, setIsSignaturePadOpen] = useState(false);
+  const [isManualMatchOpen, setIsManualMatchOpen] = useState(false);
+  const [signaturePadTargetWorker, setSignaturePadTargetWorker] = useState<string>('');
   
   // Refs to clear file inputs
   const excelInputRef = useRef<HTMLInputElement>(null);
@@ -121,6 +132,7 @@ export default function App() {
    * 실시간 미리보기 모델 생성
    * - '내보내기' 전에 실제 출력과 유사한 결과를 즉시 확인할 수 있도록
    *   대체 내보내기 서비스의 HTML 변환 로직 기반 모델을 재사용한다.
+   * - 주민번호 마스킹 및 선택된 활성 시트 반영
    */
   useEffect(() => {
     if (state.step !== 'preview' || !state.excelBuffer) {
@@ -137,7 +149,11 @@ export default function App() {
           state.excelBuffer as ArrayBuffer,
           state.assignments,
           state.signatures,
-          true
+          true,
+          {
+            maskResidentNumber: state.maskResidentNumber,
+            targetSheetIndex: state.activeSheetIndex,
+          }
         );
 
         if (!canceled) {
@@ -161,7 +177,17 @@ export default function App() {
     return () => {
       canceled = true;
     };
-  }, [state.step, state.excelBuffer, state.assignments, state.signatures]);
+  }, [state.step, state.excelBuffer, state.assignments, state.signatures, state.maskResidentNumber, state.activeSheetIndex]);
+
+  // 근로자 매칭 상태 목록 및 미매칭 카운트 계산
+  const workerItems = useMemo(() => {
+    if (!state.sheetData) return [];
+    return extractWorkerRowsFromSheet(state.sheetData.rows, state.assignments, state.signatures);
+  }, [state.sheetData, state.assignments, state.signatures]);
+
+  const unmatchedWorkerCount = useMemo(() => {
+    return workerItems.filter(w => !w.isMatched).length;
+  }, [workerItems]);
 
   const getUserFacingExportError = (errorMessage: string, format: 'excel' | 'pdf' | 'png') => {
     if (/out of memory|allocation failed|array buffer allocation failed/i.test(errorMessage)) {
@@ -214,12 +240,22 @@ export default function App() {
       const parseResult = await parseExcelFile(buffer, file.name);
       const sheetData = parseResult;
       const normalizedBuffer = parseResult.normalizedBuffer || buffer;
+      const availableSheets = parseResult.sheetNames || [sheetData.name];
+      const activeSheetIndex = parseResult.activeSheetIndex ?? 0;
       
       if (sheetData.rows.length === 0) {
         throw new Error("데이터가 없는 파일입니다. 성명 열과 데이터가 포함된 파일을 확인해주세요.");
       }
 
-      setState(prev => ({ ...prev, excelFile: file, excelBuffer: normalizedBuffer, sheetData, step: 'upload' }));
+      setState(prev => ({
+        ...prev,
+        excelFile: file,
+        excelBuffer: normalizedBuffer,
+        sheetData,
+        availableSheets,
+        activeSheetIndex,
+        step: 'upload'
+      }));
       if (parseResult.isTranscoded) {
         setToast({ msg: `${file.name} 호환 모드로 자동 변환 로드됨 (${sheetData.rows.length}개 행)`, type: 'success' });
       } else {
@@ -383,7 +419,7 @@ export default function App() {
     await processSignatureFiles(files);
   };
 
-  const runAutoMatch = () => {
+  const runAutoMatch = (scaleOverride?: number) => {
     if (!state.sheetData) {
       setError("엑셀 파일이 없습니다.");
       return;
@@ -401,7 +437,11 @@ export default function App() {
           setProcessing(false);
           return;
         }
-        const assignments = autoMatchSignatures(state.sheetData, state.signatures, { variationStrength });
+        const effectiveScale = scaleOverride ?? state.signatureScalePreset;
+        const assignments = autoMatchSignatures(state.sheetData, state.signatures, {
+          variationStrength,
+          scaleMultiplier: effectiveScale,
+        });
         setState(prev => ({ ...prev, assignments, step: 'preview' }));
         setProcessing(false);
         
@@ -413,6 +453,136 @@ export default function App() {
           setToast({ msg: `✅ ${assignments.size}개 위치에 ${signatureCount}명의 서명이 배치되었습니다`, type: 'success' });
         }
     }, 100);
+  };
+
+  /**
+   * 1. 주민등록번호 뒷자리 마스킹 토글 핸들러 (키퍼 - 보안)
+   */
+  const handleMaskResidentNumberChange = (value: boolean) => {
+    setState(prev => ({ ...prev, maskResidentNumber: value }));
+    setToast({
+      msg: value ? '🛡️ 주민번호 뒷자리 마스킹 활성화' : '주민번호 마스킹 해제',
+      type: 'info',
+    });
+  };
+
+  /**
+   * 2. 서명 크기 프리셋 변경 핸들러 (루미 - 디자인)
+   */
+  const handleSignatureScalePresetChange = (newScale: number) => {
+    setState(prev => {
+      const updatedAssignments = new Map<string, SignatureAssignment>();
+      for (const [key, assignment] of prev.assignments.entries()) {
+        const baseScale = 1.25;
+        updatedAssignments.set(key, {
+          ...assignment,
+          scale: baseScale * newScale,
+        });
+      }
+      return {
+        ...prev,
+        signatureScalePreset: newScale,
+        assignments: updatedAssignments,
+      };
+    });
+  };
+
+  /**
+   * 3. 다중 워크시트 선택 전환 핸들러 (코어 - 기술개발)
+   */
+  const handleSelectSheet = async (sheetIdx: number) => {
+    if (!state.excelBuffer || sheetIdx === state.activeSheetIndex) return;
+
+    try {
+      setProcessing(true);
+      const parseResult = await parseExcelFile(state.excelBuffer, state.excelFile?.name, sheetIdx);
+      const newSheetData = parseResult;
+      
+      const newAssignments = state.signatures.size > 0
+        ? autoMatchSignatures(newSheetData, state.signatures, {
+            variationStrength,
+            scaleMultiplier: state.signatureScalePreset,
+          })
+        : new Map();
+
+      setState(prev => ({
+        ...prev,
+        sheetData: newSheetData,
+        activeSheetIndex: sheetIdx,
+        assignments: newAssignments,
+      }));
+
+      setToast({ msg: `시트 전환: ${newSheetData.name} (${newSheetData.rows.length}개 행)`, type: 'info' });
+    } catch (sheetErr) {
+      console.error('Sheet switch error:', sheetErr);
+      setError('시트 전환 중 오류가 발생했습니다.');
+    } finally {
+      setProcessing(false);
+    }
+  };
+
+  /**
+   * 4. 현장 즉석 수기 서명 패드 저장 핸들러 (아틀라스 - 확장성)
+   */
+  const handleSaveInstantSignature = async (file: File, workerName: string) => {
+    await processSignatureFiles([file]);
+
+    // 해당 근로자가 현재 시트에 있으면 자동으로 즉시 서명 배정
+    if (state.sheetData) {
+      setTimeout(() => {
+        if (!state.sheetData) return;
+        const updatedAssignments = autoMatchSignatures(state.sheetData, state.signatures, {
+          variationStrength,
+          scaleMultiplier: state.signatureScalePreset,
+        });
+        setState(prev => ({
+          ...prev,
+          assignments: updatedAssignments,
+        }));
+        setToast({ msg: `✅ ${workerName}님의 즉석 서명이 등록 및 반영되었습니다`, type: 'success' });
+      }, 150);
+    }
+  };
+
+  /**
+   * 5. 외국인 근로자 및 미매칭 서명 수동 연결 적용 (나비 - 사용성)
+   */
+  const handleApplyManualMatches = (manualMatches: { rowNumber: number; signatureBaseName: string; signatureVariantId: string }[]) => {
+    if (!state.sheetData) return;
+
+    const nextAssignments = new Map(state.assignments);
+    const workerItemsMap = new Map(workerItems.map(w => [w.rowNumber, w]));
+
+    for (const match of manualMatches) {
+      const worker = workerItemsMap.get(match.rowNumber);
+      if (!worker) continue;
+
+      for (const cell of worker.placeholderCells) {
+        const key = `${cell.row}:${cell.col}`;
+        nextAssignments.set(key, {
+          row: cell.row,
+          col: cell.col,
+          signatureBaseName: match.signatureBaseName,
+          signatureVariantId: match.signatureVariantId,
+          rotation: 0,
+          scale: 1.25 * state.signatureScalePreset,
+          offsetX: 0,
+          offsetY: 0,
+        });
+      }
+    }
+
+    setState(prev => ({
+      ...prev,
+      assignments: nextAssignments,
+    }));
+
+    setToast({ msg: `✅ ${manualMatches.length}명의 서명이 수동 연결되었습니다`, type: 'success' });
+  };
+
+  const handleOpenSignaturePadForWorker = (workerName: string) => {
+    setSignaturePadTargetWorker(workerName);
+    setIsSignaturePadOpen(true);
   };
 
   const handleExport = async (isRetry: boolean = false) => {
@@ -458,7 +628,10 @@ export default function App() {
       if (exportFormat === 'pdf') {
         // PDF 내보내기
         const filename = `서명완료_${timestamp}_${baseFilename}.pdf`;
-        await exportToPDF(state.excelBuffer, assignmentsToUse, state.signatures, filename);
+        await exportToPDF(state.excelBuffer, assignmentsToUse, state.signatures, filename, {
+          maskResidentNumber: state.maskResidentNumber,
+          targetSheetIndex: state.activeSheetIndex,
+        });
         
         const elapsed = performance.now() - startTime;
         console.log(`========== [내보내기 결과] ==========`);
@@ -471,7 +644,10 @@ export default function App() {
       } else if (exportFormat === 'png') {
         // PNG 내보내기
         const filename = `서명완료_${timestamp}_${baseFilename}.png`;
-        await exportToPNG(state.excelBuffer, assignmentsToUse, state.signatures, filename);
+        await exportToPNG(state.excelBuffer, assignmentsToUse, state.signatures, filename, {
+          maskResidentNumber: state.maskResidentNumber,
+          targetSheetIndex: state.activeSheetIndex,
+        });
         
         const elapsed = performance.now() - startTime;
         console.log(`========== [내보내기 결과] ==========`);
@@ -483,7 +659,11 @@ export default function App() {
         setError(null);
       } else {
         // Excel 내보내기 (기본)
-        const blob = await generateFinalExcel(state.excelBuffer, assignmentsToUse, state.signatures);
+        const blob = await generateFinalExcel(state.excelBuffer, assignmentsToUse, state.signatures, {
+          maskResidentNumber: state.maskResidentNumber,
+          targetSheetIndex: state.activeSheetIndex,
+          scaleMultiplier: state.signatureScalePreset,
+        });
         
         const elapsed = performance.now() - startTime;
         console.log(`========== [내보내기 결과] ==========`);
@@ -582,6 +762,9 @@ export default function App() {
         sourceFileName: state.excelFile.name,
         count: total,
         variationStrength,
+        maskResidentNumber: state.maskResidentNumber,
+        scaleMultiplier: state.signatureScalePreset,
+        targetSheetIndex: state.activeSheetIndex,
         onProgress: setBatchProgress,
         signal: abortController.signal,
       });
@@ -849,6 +1032,17 @@ export default function App() {
                 onChange={handleFolderUpload} 
               />
             </label>
+
+            <button
+              type="button"
+              onClick={() => {
+                setSignaturePadTargetWorker('');
+                setIsSignaturePadOpen(true);
+              }}
+              className="col-span-2 cursor-pointer bg-indigo-50 border border-indigo-200 text-indigo-700 px-3 py-2.5 rounded-lg hover:bg-indigo-100 transition-colors text-center flex items-center justify-center gap-1.5 text-xs font-semibold"
+            >
+              <PenTool size={14} /> 현장 즉석 수기 서명 패드 (Canvas)
+            </button>
           </div>
 
           {/* Drag & Drop 유도 영역 */}
@@ -892,10 +1086,23 @@ export default function App() {
         variationStrength={variationStrength}
         batchCount={batchCount}
         batchProgress={batchProgress}
+        maskResidentNumber={state.maskResidentNumber}
+        signatureScalePreset={state.signatureScalePreset}
+        availableSheets={state.availableSheets}
+        activeSheetIndex={state.activeSheetIndex}
+        unmatchedWorkerCount={unmatchedWorkerCount}
         onVariationStrengthChange={setVariationStrength}
         onBatchCountChange={(value) => setBatchCount(Math.max(1, Math.min(50, value || 1)))}
         onExportFormatChange={setExportFormat}
-        onAutoMatch={runAutoMatch}
+        onMaskResidentNumberChange={handleMaskResidentNumberChange}
+        onSignatureScalePresetChange={handleSignatureScalePresetChange}
+        onSelectSheet={handleSelectSheet}
+        onOpenManualMatch={() => setIsManualMatchOpen(true)}
+        onOpenSignaturePad={() => {
+          setSignaturePadTargetWorker('');
+          setIsSignaturePadOpen(true);
+        }}
+        onAutoMatch={() => runAutoMatch()}
         onSingleExport={() => handleExport(false)}
         onBatchZipExport={handleBatchZipExport}
         onCancelBatchExport={handleCancelBatchExport}
@@ -1112,6 +1319,25 @@ export default function App() {
           </div>
         </div>
       )}
+
+      {/* 현장 즉석 수기 서명 패드 모달 */}
+      <SignaturePadModal
+        isOpen={isSignaturePadOpen}
+        onClose={() => setIsSignaturePadOpen(false)}
+        defaultWorkerName={signaturePadTargetWorker}
+        onSave={handleSaveInstantSignature}
+      />
+
+      {/* 외국인 근로자 및 미매칭 서명 수동 연결 모달 */}
+      <ManualMatchModal
+        isOpen={isManualMatchOpen}
+        onClose={() => setIsManualMatchOpen(false)}
+        workerItems={workerItems}
+        signatures={state.signatures}
+        maskResidentNumber={state.maskResidentNumber}
+        onApplyMatches={handleApplyManualMatches}
+        onOpenSignaturePadForWorker={handleOpenSignaturePadForWorker}
+      />
     </div>
   );
 }

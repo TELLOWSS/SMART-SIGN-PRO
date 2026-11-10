@@ -18,6 +18,9 @@ export interface BatchExcelZipOptions {
   sourceFileName: string;
   count: number;
   variationStrength: number;
+  maskResidentNumber?: boolean;
+  scaleMultiplier?: number;
+  targetSheetIndex?: number;
   onProgress?: (progress: BatchExportProgress) => void;
   signal?: AbortSignal;
 }
@@ -75,8 +78,15 @@ export const buildBatchExcelZip = async (options: BatchExcelZipOptions): Promise
     await new Promise(resolve => setTimeout(resolve, mode === 'high-volume' ? 16 : 0));
     throwIfAborted(signal);
 
-    const assignments = autoMatchSignatures(sheetData, signatures, { variationStrength });
-    const excelBlob = await generateFinalExcel(originalBuffer, assignments, signatures);
+    const assignments = autoMatchSignatures(sheetData, signatures, {
+      variationStrength,
+      scaleMultiplier: options.scaleMultiplier,
+    });
+    const excelBlob = await generateFinalExcel(originalBuffer, assignments, signatures, {
+      maskResidentNumber: options.maskResidentNumber,
+      targetSheetIndex: options.targetSheetIndex,
+      scaleMultiplier: options.scaleMultiplier,
+    });
     throwIfAborted(signal);
 
     // JSZip에는 ArrayBuffer로 넣어 메모리 복사 오버헤드를 줄인다.

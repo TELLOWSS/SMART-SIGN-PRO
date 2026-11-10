@@ -338,3 +338,162 @@ export const extractFilesFromDataTransfer = async (dataTransfer: DataTransfer): 
   return [];
 };
 
+/**
+ * 주민등록번호 및 외국인등록번호/여권번호 마스킹 (개인정보 보호법 및 현장 제출 감사 규정 준수)
+ * - 내국인 주민번호(13자리): 670305-1234567 -> 670305-1******
+ * - 내국인 단축형: 670305-1 -> 670305-1******
+ * - 외국인등록번호/여권번호: E01109933 -> E011*****, C9859552 -> C985****
+ */
+export const maskIdentificationNumber = (value: string | number | null | undefined): string => {
+  if (value === null || value === undefined) return '';
+  const str = String(value).trim();
+  if (!str) return '';
+
+  // 1. 표준 주민등록번호 13자리 (하이픈 유무 무관)
+  // 예: 670305-1234567 -> 670305-1******
+  if (/^\d{6}[-\s]?[1-8]\d{6}$/.test(str)) {
+    return str.replace(/^(\d{6})[-\s]?([1-8])\d{6}$/, '$1-$2******');
+  }
+
+  // 2. 단축형 주민등록번호 (생년월일 6자리 + 뒷자리 첫 글자)
+  // 예: 670305-1 -> 670305-1******
+  if (/^\d{6}[-\s][1-8]\*?$/.test(str)) {
+    return str.replace(/^(\d{6})[-\s]([1-8])\*?$/, '$1-$2******');
+  }
+
+  // 3. 영문+숫자 혼합 외국인등록번호 / 여권번호 형태 (예: E01109933, C9859552, P02535409, K0083508)
+  const foreignMatch = str.match(/^([A-Za-z]\d{2,3})(\d{3,8})$/);
+  if (foreignMatch) {
+    const prefix = foreignMatch[1];
+    const suffix = foreignMatch[2];
+    return prefix + '*'.repeat(suffix.length);
+  }
+
+  // 4. 일반적인 8자리 이상 주민/등록번호 패턴
+  if (/^[A-Za-z0-9]{8,14}$/.test(str)) {
+    const keepLen = Math.min(4, Math.floor(str.length / 2));
+    return str.slice(0, keepLen) + '*'.repeat(str.length - keepLen);
+  }
+
+  return str;
+};
+
+/**
+ * 엑셀 XML 내부의 텍스트 노드(<t>...</t>) 중 주민등록번호/외국인번호를 안전하게 마스킹 치환
+ * - 셀 스타일이나 태그 구조는 0.1%도 손대지 않고 값 텍스트만 치환
+ */
+export const maskXmlContent = (xml: string): string => {
+  if (!xml) return xml;
+
+  return xml.replace(/<t([^>]*)>(.*?)<\/t>/g, (fullMatch, attr, text) => {
+    const trimmed = text.trim();
+    const masked = maskIdentificationNumber(trimmed);
+    if (masked !== trimmed) {
+      return `<t${attr}>${masked}</t>`;
+    }
+    return fullMatch;
+  });
+};
+
+/**
+ * 시트 데이터에서 근로자 행을 정밀 추출하여 수동 매칭 및 관리 목록 생성
+ */
+export const extractWorkerRowsFromSheet = (
+  rows: { index: number; cells: { row: number; col: number; value: any; address: string }[] }[],
+  assignments: Map<string, any>,
+  signatures: Map<string, any[]>
+) => {
+  let nameCol = -1;
+  let residentCol = -1;
+  let jobCol = -1;
+  let companyCol = -1;
+  let headerRow = -1;
+
+  const MAX_SEARCH = Math.min(50, rows.length);
+
+  for (let r = 0; r < MAX_SEARCH; r++) {
+    const row = rows[r];
+    for (const cell of row.cells) {
+      if (!cell.value) continue;
+      const cleanVal = String(cell.value).replace(/[\s\u00A0\uFEFF]+/g, '');
+      if (nameCol === -1 && /(성명|이름|근로자|작업자)/i.test(cleanVal)) {
+        nameCol = cell.col;
+        headerRow = r;
+      }
+      if (residentCol === -1 && /(주민등록번호|주민번호|생년월일|외국인번호)/i.test(cleanVal)) {
+        residentCol = cell.col;
+      }
+      if (jobCol === -1 && /(직위|직종|공종|직책)/i.test(cleanVal)) {
+        jobCol = cell.col;
+      }
+      if (companyCol === -1 && /(소속|업체|협력사|회사)/i.test(cleanVal)) {
+        companyCol = cell.col;
+      }
+    }
+    if (nameCol !== -1 && headerRow !== -1) break;
+  }
+
+  if (nameCol === -1) return [];
+
+  const workerItems: {
+    rowNumber: number;
+    workerName: string;
+    jobTitle?: string;
+    affiliation?: string;
+    residentNumber?: string;
+    placeholderCells: { row: number; col: number; address: string }[];
+    assignedVariantId?: string;
+    assignedSignatureName?: string;
+    isMatched: boolean;
+  }[] = [];
+
+  for (let r = headerRow + 1; r < rows.length; r++) {
+    const row = rows[r];
+    const nameCell = row.cells.find(c => c.col === nameCol);
+    if (!nameCell || !nameCell.value) continue;
+
+    const workerName = String(nameCell.value).trim();
+    if (!workerName || workerName === '성명' || workerName === '소계' || workerName === '합계') continue;
+
+    const resCell = residentCol !== -1 ? row.cells.find(c => c.col === residentCol) : null;
+    const jobCell = jobCol !== -1 ? row.cells.find(c => c.col === jobCol) : null;
+    const compCell = companyCol !== -1 ? row.cells.find(c => c.col === companyCol) : null;
+
+    const placeholders: { row: number; col: number; address: string }[] = [];
+    let assignedVariantId: string | undefined;
+    let assignedSignatureName: string | undefined;
+
+    for (const cell of row.cells) {
+      if (cell.col === nameCol) continue;
+      if (!cell.value) continue;
+      const cellStr = String(cell.value).replace(/[\s\u00A0\uFEFF]+/g, '');
+      if (isSignaturePlaceholder(cellStr)) {
+        placeholders.push({ row: cell.row, col: cell.col, address: cell.address });
+        const key = `${cell.row}:${cell.col}`;
+        const assignment = assignments.get(key);
+        if (assignment) {
+          assignedVariantId = assignment.signatureVariantId;
+          assignedSignatureName = assignment.signatureBaseName;
+        }
+      }
+    }
+
+    if (placeholders.length > 0) {
+      workerItems.push({
+        rowNumber: row.index,
+        workerName,
+        jobTitle: jobCell?.value ? String(jobCell.value).trim() : undefined,
+        affiliation: compCell?.value ? String(compCell.value).trim() : undefined,
+        residentNumber: resCell?.value ? String(resCell.value).trim() : undefined,
+        placeholderCells: placeholders,
+        assignedVariantId,
+        assignedSignatureName,
+        isMatched: !!assignedVariantId,
+      });
+    }
+  }
+
+  return workerItems;
+};
+
+

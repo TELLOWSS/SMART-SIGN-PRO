@@ -2,7 +2,7 @@ import html2canvas from 'html2canvas';
 import jsPDF from 'jspdf';
 import ExcelJS from 'exceljs';
 import { SignatureAssignment, SignatureFile } from '../types';
-import { columnLetterToNumber, isSignaturePlaceholder, parsePrintAreaBounds, loadWorkbookSafely } from './excelUtils';
+import { columnLetterToNumber, isSignaturePlaceholder, parsePrintAreaBounds, loadWorkbookSafely, maskIdentificationNumber } from './excelUtils';
 
 export interface PreviewCellModel {
   key: string;
@@ -64,11 +64,16 @@ export const buildSheetPreviewModel = async (
   originalBuffer: ArrayBuffer,
   assignments: Map<string, SignatureAssignment>,
   signaturesMap: Map<string, SignatureFile[]>,
-  printAreaOnly: boolean = true
+  printAreaOnly: boolean = true,
+  options?: {
+    maskResidentNumber?: boolean;
+    targetSheetIndex?: number;
+  }
 ): Promise<SheetPreviewModel> => {
   const { workbook } = await loadWorkbookSafely(originalBuffer);
 
-  const worksheet = workbook.worksheets[0];
+  const targetIdx = options?.targetSheetIndex ?? 0;
+  const worksheet = (workbook.worksheets.length > targetIdx ? workbook.worksheets[targetIdx] : null) || workbook.worksheets[0];
   if (!worksheet) {
     throw new Error('워크시트를 찾을 수 없습니다.');
   }
@@ -141,6 +146,10 @@ export const buildSheetPreviewModel = async (
         } else {
           displayValue = cellValue.toString();
         }
+      }
+
+      if (options?.maskResidentNumber && displayValue) {
+        displayValue = maskIdentificationNumber(displayValue);
       }
 
       const assignment = assignments.get(cellKey);
@@ -287,9 +296,13 @@ const renderSheetToCanvas = async (
   originalBuffer: ArrayBuffer,
   assignments: Map<string, SignatureAssignment>,
   signaturesMap: Map<string, SignatureFile[]>,
-  printAreaOnly: boolean = true
+  printAreaOnly: boolean = true,
+  options?: {
+    maskResidentNumber?: boolean;
+    targetSheetIndex?: number;
+  }
 ): Promise<HTMLCanvasElement> => {
-  const previewModel = await buildSheetPreviewModel(originalBuffer, assignments, signaturesMap, printAreaOnly);
+  const previewModel = await buildSheetPreviewModel(originalBuffer, assignments, signaturesMap, printAreaOnly, options);
   console.log(`[렌더링] 행: ${previewModel.printAreaRows.start}-${previewModel.printAreaRows.end}, 열: ${previewModel.printAreaCols.start}-${previewModel.printAreaCols.end}`);
 
   // HTML 테이블 생성
@@ -342,11 +355,15 @@ export const exportToPNG = async (
   originalBuffer: ArrayBuffer,
   assignments: Map<string, SignatureAssignment>,
   signaturesMap: Map<string, SignatureFile[]>,
-  filename: string = 'export.png'
+  filename: string = 'export.png',
+  options?: {
+    maskResidentNumber?: boolean;
+    targetSheetIndex?: number;
+  }
 ): Promise<void> => {
   console.log('[PNG 내보내기] 시작...');
   
-  const canvas = await renderSheetToCanvas(originalBuffer, assignments, signaturesMap, true);
+  const canvas = await renderSheetToCanvas(originalBuffer, assignments, signaturesMap, true, options);
   
   // Canvas를 Blob으로 변환 (Promise로 감싸서 에러 처리)
   return new Promise((resolve, reject) => {
@@ -383,11 +400,15 @@ export const exportToPDF = async (
   originalBuffer: ArrayBuffer,
   assignments: Map<string, SignatureAssignment>,
   signaturesMap: Map<string, SignatureFile[]>,
-  filename: string = 'export.pdf'
+  filename: string = 'export.pdf',
+  options?: {
+    maskResidentNumber?: boolean;
+    targetSheetIndex?: number;
+  }
 ): Promise<void> => {
   console.log('[PDF 내보내기] 시작...');
   
-  const canvas = await renderSheetToCanvas(originalBuffer, assignments, signaturesMap, true);
+  const canvas = await renderSheetToCanvas(originalBuffer, assignments, signaturesMap, true, options);
   
   // PDF 페이지 크기 상수
   const A4_WIDTH_MM = 210;

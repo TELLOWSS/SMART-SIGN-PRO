@@ -2,7 +2,7 @@ import ExcelJS from 'exceljs';
 import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
 import { SheetData, RowData, CellData, SignatureFile, SignatureAssignment, ParseExcelResult } from '../types';
-import { columnNumberToLetter, parseCellAddress, isSignaturePlaceholder, randomInt, randomFloat, parsePrintAreaBounds, loadWorkbookSafely } from './excelUtils';
+import { columnNumberToLetter, parseCellAddress, isSignaturePlaceholder, randomInt, randomFloat, parsePrintAreaBounds, loadWorkbookSafely, maskIdentificationNumber, maskXmlContent } from './excelUtils';
 
 export interface AutoMatchOptions {
   /**
@@ -11,6 +11,11 @@ export interface AutoMatchOptions {
    * - 100에 가까울수록 더 자연스럽고 랜덤한 변형을 적용한다.
    */
   variationStrength?: number;
+  /**
+   * 서명 크기 비율 배수 (0.7 ~ 1.3, 기본값 1.0)
+   * - 좁은 서명란(0.85)부터 넓은 서명란(1.15)까지 칸 크기에 맞춰 미세 조정
+   */
+  scaleMultiplier?: number;
 }
 
 /**
@@ -179,8 +184,10 @@ const rotateImage = async (blobUrl: string, degrees: number): Promise<string> =>
 /**
  * SheetJS 워크북에서 직접 SheetData를 추출하는 최후 복구 함수
  */
-const extractSheetDataFromSheetJS = (wb: XLSX.WorkBook): SheetData => {
-  const sheetName = wb.SheetNames[0];
+const extractSheetDataFromSheetJS = (wb: XLSX.WorkBook, targetSheetName?: string): SheetData => {
+  const sheetName = targetSheetName && wb.SheetNames.includes(targetSheetName)
+    ? targetSheetName
+    : wb.SheetNames[0];
   if (!sheetName) throw new Error("시트가 비어있습니다.");
   const ws = wb.Sheets[sheetName];
   if (!ws) throw new Error("시트를 찾을 수 없습니다.");
@@ -249,12 +256,14 @@ const extractSheetDataFromSheetJS = (wb: XLSX.WorkBook): SheetData => {
 /**
  * 업로드된 엑셀 파일 버퍼를 파싱
  * 1차: 원본 그대로 ExcelJS 로드 (스타일 및 서식 최대 보존)
- * 2차: ExcelJS 실패 시 SheetJS로 호환 로드 (XLS, HTML-XLS, 손상된 메타데이터 자동 복구) 후 표준 XLSX로 트랜스코딩
+ * 2차: ExcelJS 실패 시 SheetJS로 호환 로드 후 표준 XLSX로 트랜스코딩
  * 3차: 직접 SheetJS 데이터 파싱 (최후 방어선)
+ * - 다중 워크시트(월별/공종별 탭) 감지 및 타겟 시트 파싱 지원
  */
 export const parseExcelFile = async (
   buffer: ArrayBuffer,
-  fileName?: string
+  fileName?: string,
+  targetSheetNameOrIndex?: string | number
 ): Promise<ParseExcelResult> => {
   if (!buffer || buffer.byteLength === 0) {
     throw new Error("파일 버퍼가 비어있습니다.");
@@ -277,18 +286,50 @@ export const parseExcelFile = async (
         type: 'array',
         cellDates: true,
       });
-      const sheetData = extractSheetDataFromSheetJS(sheetJsWb);
+      const sheetJsNames = sheetJsWb.SheetNames || ['Sheet1'];
+      let chosenName = sheetJsNames[0];
+      let chosenIdx = 0;
+      if (typeof targetSheetNameOrIndex === 'number' && targetSheetNameOrIndex >= 0 && targetSheetNameOrIndex < sheetJsNames.length) {
+        chosenIdx = targetSheetNameOrIndex;
+        chosenName = sheetJsNames[chosenIdx];
+      } else if (typeof targetSheetNameOrIndex === 'string' && sheetJsNames.includes(targetSheetNameOrIndex)) {
+        chosenName = targetSheetNameOrIndex;
+        chosenIdx = sheetJsNames.indexOf(chosenName);
+      }
+      const sheetData = extractSheetDataFromSheetJS(sheetJsWb, chosenName);
       return {
         ...sheetData,
         normalizedBuffer: buffer,
         isTranscoded: true,
+        sheetNames: sheetJsNames,
+        activeSheetIndex: chosenIdx,
       };
     } catch {
       throw loadErr;
     }
   }
 
-  const worksheet = workbook.worksheets[0];
+  const sheetNames = workbook.worksheets.map((ws, i) => ws.name || `Sheet${i + 1}`);
+  let activeSheetIndex = 0;
+  let worksheet: ExcelJS.Worksheet | undefined;
+
+  if (typeof targetSheetNameOrIndex === 'number') {
+    activeSheetIndex = Math.max(0, Math.min(workbook.worksheets.length - 1, targetSheetNameOrIndex));
+    worksheet = workbook.worksheets[activeSheetIndex];
+  } else if (typeof targetSheetNameOrIndex === 'string') {
+    const idx = workbook.worksheets.findIndex(ws => ws.name === targetSheetNameOrIndex);
+    if (idx !== -1) {
+      activeSheetIndex = idx;
+      worksheet = workbook.worksheets[idx];
+    } else {
+      worksheet = workbook.getWorksheet(targetSheetNameOrIndex);
+    }
+  }
+
+  if (!worksheet) {
+    worksheet = workbook.worksheets[0];
+    activeSheetIndex = 0;
+  }
   if (!worksheet) throw new Error("파일에서 워크시트를 찾을 수 없습니다.");
 
   const rows: RowData[] = [];
@@ -345,12 +386,14 @@ export const parseExcelFile = async (
   console.log(`[parseExcelFile] Print area: ${printArea || 'Not set'}`);
 
   return {
-    name: worksheet.name || 'Sheet1',
+    name: worksheet.name || `Sheet${activeSheetIndex + 1}`,
     rows,
     mergedCells,
     printArea,
     normalizedBuffer,
     isTranscoded,
+    sheetNames,
+    activeSheetIndex,
   };
 };
 
@@ -434,7 +477,20 @@ export const autoMatchSignatures = (
 
     if (!cleanName) continue;
 
-    const availableSigs = signatures.get(cleanName);
+    let matchedSigKey = cleanName;
+    let availableSigs = signatures.get(cleanName);
+
+    // 스마트 외국인/특수문자/공백 차이/부분일치 폴백 (나비 - 사용성)
+    if (!availableSigs || availableSigs.length === 0) {
+      for (const [sigKey, sigFiles] of signatures.entries()) {
+        const normSigKey = normalizeName(sigKey);
+        if (normSigKey && (normSigKey === cleanName || cleanName.includes(normSigKey) || normSigKey.includes(cleanName))) {
+          availableSigs = sigFiles;
+          matchedSigKey = sigKey;
+          break;
+        }
+      }
+    }
     
     // 방어적 코드: 손상된 파일/빈 variant를 제외한 유효 서명만 사용
     const validAvailableSigs = (availableSigs || []).filter((sig): sig is SignatureFile => {
@@ -506,15 +562,16 @@ export const autoMatchSignatures = (
           
           // Random offset calculations for natural variation
           // Using helper function for cleaner code and consistent ranges
+          const scaleMultiplier = options.scaleMultiplier ?? 1.0;
           const rotation = randomInt(-rotationLimit, rotationLimit);
-          const scale = randomFloat(minScale, maxScale);
+          const scale = randomFloat(minScale, maxScale) * scaleMultiplier;
           const offsetX = randomInt(-offsetXLimit, offsetXLimit);
           const offsetY = randomInt(-offsetYLimit, offsetYLimit);
 
           assignments.set(key, {
             row: cell.row,
             col: cell.col,
-            signatureBaseName: cleanName,
+            signatureBaseName: matchedSigKey,
             signatureVariantId: selectedSig.variant,
             rotation,
             scale,
@@ -829,9 +886,21 @@ export interface DirectSignaturePlacement {
  */
 export const injectSignaturesLossless = async (
   originalBuffer: ArrayBuffer,
-  placements: DirectSignaturePlacement[]
+  placements: DirectSignaturePlacement[],
+  options?: {
+    maskResidentNumber?: boolean;
+    targetSheetIndex?: number;
+  }
 ): Promise<ArrayBuffer> => {
   const zip = await JSZip.loadAsync(originalBuffer);
+
+  // 0. 개인정보 보호: 주민등록번호 및 외국인등록번호 마스킹 (옵션 활성화 시)
+  if (options?.maskResidentNumber) {
+    if (zip.file('xl/sharedStrings.xml')) {
+      const ssXml = await zip.file('xl/sharedStrings.xml')!.async('string');
+      zip.file('xl/sharedStrings.xml', maskXmlContent(ssXml));
+    }
+  }
 
   // 1. [Content_Types].xml에 PNG 확장자 등록 보장
   let ct = await zip.file('[Content_Types].xml')!.async('string');
@@ -840,9 +909,36 @@ export const injectSignaturesLossless = async (
     zip.file('[Content_Types].xml', ct);
   }
 
-  // 2. 워크시트 및 drawing 관계 경로 확인
+  // 2. 대상 워크시트 및 drawing 관계 경로 확인
+  const targetSheetIdx = options?.targetSheetIndex ?? 0;
+  const sheetFiles = Object.keys(zip.files)
+    .filter(k => k.startsWith('xl/worksheets/sheet') && k.endsWith('.xml') && !k.includes('_rels'))
+    .sort();
+
+  const sheetPath = (sheetFiles.length > targetSheetIdx ? sheetFiles[targetSheetIdx] : sheetFiles[0]) || 'xl/worksheets/sheet1.xml';
+  const sheetBaseName = sheetPath.split('/').pop()!;
+  const sheetRelKey = `xl/worksheets/_rels/${sheetBaseName}.rels`;
+
+  // 워크시트 XML 인라인 문자열 마스킹 (활성화 시)
+  if (options?.maskResidentNumber && zip.file(sheetPath)) {
+    const sXml = await zip.file(sheetPath)!.async('string');
+    zip.file(sheetPath, maskXmlContent(sXml));
+  }
+
   let drawFilePath = 'xl/drawings/drawing1.xml';
   let drawRelsPath = 'xl/drawings/_rels/drawing1.xml.rels';
+
+  let sRels = zip.file(sheetRelKey) ? await zip.file(sheetRelKey)!.async('string') : null;
+  if (sRels) {
+    const drawRelMatch = sRels.match(/Type="[^"]*\/drawing"[^>]*Target="([^"]+)"/) ||
+                         sRels.match(/Target="([^"]+)"[^>]*Type="[^"]*\/drawing"/);
+    if (drawRelMatch) {
+      const targetRel = drawRelMatch[1].replace(/^\.\.\//, 'xl/');
+      drawFilePath = targetRel.startsWith('xl/') ? targetRel : `xl/${targetRel}`;
+      const drawName = drawFilePath.split('/').pop()!;
+      drawRelsPath = `xl/drawings/_rels/${drawName}.rels`;
+    }
+  }
 
   let drawXml = zip.file(drawFilePath) ? await zip.file(drawFilePath)!.async('string') : null;
   let drawRels = zip.file(drawRelsPath) ? await zip.file(drawRelsPath)!.async('string') : null;
@@ -852,21 +948,16 @@ export const injectSignaturesLossless = async (
     drawRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
 
     if (!ct.includes('drawing+xml')) {
-      ct = ct.replace('</Types>', '<Override PartName="/xl/drawings/drawing1.xml" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/></Types>');
+      ct = ct.replace('</Types>', `<Override PartName="/${drawFilePath}" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/></Types>`);
       zip.file('[Content_Types].xml', ct);
     }
 
-    const sheetRelKey = Object.keys(zip.files).find(
-      k => k.startsWith('xl/worksheets/_rels/sheet') && k.endsWith('.xml.rels')
-    ) || 'xl/worksheets/_rels/sheet1.xml.rels';
-
-    let sRels = zip.file(sheetRelKey) ? await zip.file(sheetRelKey)!.async('string') : '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
-    const sRIds = [...sRels.matchAll(/Id="rId(\d+)"/g)].map(m => parseInt(m[1], 10));
+    let relsContent = sRels || '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
+    const sRIds = [...relsContent.matchAll(/Id="rId(\d+)"/g)].map(m => parseInt(m[1], 10));
     const nextSRId = `rId${Math.max(...sRIds, 0) + 1}`;
-    sRels = sRels.replace('</Relationships>', `<Relationship Id="${nextSRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>`);
-    zip.file(sheetRelKey, sRels);
+    relsContent = relsContent.replace('</Relationships>', `<Relationship Id="${nextSRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/${drawFilePath.split('/').pop()}"/></Relationships>`);
+    zip.file(sheetRelKey, relsContent);
 
-    const sheetPath = sheetRelKey.replace('_rels/', '').replace('.rels', '');
     if (zip.file(sheetPath)) {
       let sXml = await zip.file(sheetPath)!.async('string');
       if (!sXml.includes('<drawing')) {
@@ -947,7 +1038,12 @@ export const injectSignaturesLossless = async (
 export const generateFinalExcel = async (
   originalBuffer: ArrayBuffer,
   assignments: Map<string, SignatureAssignment>,
-  signaturesMap: Map<string, SignatureFile[]>
+  signaturesMap: Map<string, SignatureFile[]>,
+  options?: {
+    maskResidentNumber?: boolean;
+    targetSheetIndex?: number;
+    scaleMultiplier?: number;
+  }
 ): Promise<Blob> => {
   if (!originalBuffer || originalBuffer.byteLength === 0) {
     throw new Error("원본 파일 버퍼가 비어있습니다.");
@@ -958,7 +1054,8 @@ export const generateFinalExcel = async (
   // Step 1: 원본 파일 로드 (구조 유지 및 호환 변환 지원)
   const { workbook, normalizedBuffer, isTranscoded } = await loadWorkbookSafely(originalBuffer);
 
-  const worksheet = workbook.worksheets[0];
+  const targetIdx = options?.targetSheetIndex ?? 0;
+  const worksheet = (workbook.worksheets.length > targetIdx ? workbook.worksheets[targetIdx] : null) || workbook.worksheets[0];
   if (!worksheet) {
     throw new Error("워크시트를 찾을 수 없습니다.");
   }
@@ -1537,7 +1634,10 @@ export const generateFinalExcel = async (
     if (!isTranscoded && directPlacements.length > 0) {
       try {
         console.log(`[무손실 서명 주입] 원본 XLSX 직접 주입 시작 (${directPlacements.length}개 서명)`);
-        const losslessBuffer = await injectSignaturesLossless(normalizedBuffer, directPlacements);
+        const losslessBuffer = await injectSignaturesLossless(normalizedBuffer, directPlacements, {
+          maskResidentNumber: options?.maskResidentNumber,
+          targetSheetIndex: options?.targetSheetIndex,
+        });
         const buffer = await sanitizeGeneratedWorkbookBuffer(losslessBuffer);
 
         const view = new Uint8Array(buffer);
@@ -1550,6 +1650,21 @@ export const generateFinalExcel = async (
       } catch (losslessErr) {
         console.warn(`[무손실 주입 실패] ExcelJS 폴백 저장으로 전환:`, losslessErr);
       }
+    }
+
+    // ExcelJS 폴백 저장 시 개인정보 마스킹 반영
+    if (options?.maskResidentNumber) {
+      worksheet.eachRow({ includeEmpty: false }, (row) => {
+        row.eachCell({ includeEmpty: false }, (cell) => {
+          if (cell.value) {
+            const valStr = cell.value.toString();
+            const masked = maskIdentificationNumber(valStr);
+            if (masked !== valStr) {
+              cell.value = masked;
+            }
+          }
+        });
+      });
     }
 
     const rawBuffer = await workbook.xlsx.writeBuffer();
