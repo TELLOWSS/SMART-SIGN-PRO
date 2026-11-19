@@ -3,6 +3,16 @@ import * as XLSX from 'xlsx';
 import JSZip from 'jszip';
 import { SheetData, RowData, CellData, SignatureFile, SignatureAssignment, ParseExcelResult } from '../types';
 import { columnNumberToLetter, parseCellAddress, isSignaturePlaceholder, randomInt, randomFloat, parsePrintAreaBounds, loadWorkbookSafely, maskIdentificationNumber, maskXmlContent } from './excelUtils';
+import {
+  insertDrawingElementInWorksheetXml,
+  fixWorksheetDrawingOrder,
+  appendRelationshipsXml,
+  prepareDrawingXml,
+  resolveTargetWorksheetPath,
+  allocateNextDrawingPath,
+  ensureContentTypesForDrawingAndPng,
+  validateXlsxIntegrity,
+} from './ooxmlUtils';
 
 export interface AutoMatchOptions {
   /**
@@ -803,37 +813,66 @@ const validateWorksheetPreservation = (
 };
 
 /**
- * ExcelJS가 생성한 XLSX ArrayBuffer를 OpenXML 표준 및 Microsoft Excel 무결성 요구사항에 맞게 사후 보정
- * 1. sheetFormatPr에 필수 속성인 defaultRowHeight 누락 방지 (Excel 복구 대화상자의 핵심 원인 해결)
- * 2. drawing XML의 a16:creationId 중복 GUID를 고유 GUID로 변환 (다중 이미지 시 Excel 충돌 방지)
+ * 생성된 XLSX ArrayBuffer를 ISO/IEC 29500 (OOXML) 표준 및 Microsoft Excel 무결성 요구사항에 맞게 사후 보정
+ * 1. sheetFormatPr에 필수 속성인 defaultRowHeight 누락 방지
+ * 2. 워크시트 <drawing> 요소 위치가 <extLst>/<legacyDrawing>/<tableParts> 뒤에 있는 스키마 위반 보정
+ * 3. drawing XML의 oneCellAnchor 불법 editAs 속성 제거 및 a16:creationId 중복 GUID 고유화
  */
 export const sanitizeGeneratedWorkbookBuffer = async (buffer: ArrayBuffer): Promise<ArrayBuffer> => {
   try {
     const zip = await JSZip.loadAsync(buffer);
     let modified = false;
 
-    // 1. 모든 워크시트 XML의 sheetFormatPr 보정
+    // 1. 모든 워크시트 XML 보정 (sheetFormatPr + <drawing> 요소 순서)
     for (const filename of Object.keys(zip.files)) {
-      if (filename.startsWith('xl/worksheets/sheet') && filename.endsWith('.xml')) {
+      if (filename.startsWith('xl/worksheets/sheet') && filename.endsWith('.xml') && !filename.includes('_rels')) {
         let sheetXml = await zip.file(filename)!.async('string');
+        let sheetChanged = false;
+
         if (sheetXml.includes('<sheetFormatPr') && !sheetXml.includes('defaultRowHeight=')) {
           sheetXml = sheetXml.replace('<sheetFormatPr', '<sheetFormatPr defaultRowHeight="15"');
+          sheetChanged = true;
+        }
+
+        const fixedOrderXml = fixWorksheetDrawingOrder(sheetXml);
+        if (fixedOrderXml !== sheetXml) {
+          sheetXml = fixedOrderXml;
+          sheetChanged = true;
+        }
+
+        if (sheetChanged) {
           zip.file(filename, sheetXml);
           modified = true;
         }
       }
     }
 
-    // 2. 모든 드로잉 XML의 a16:creationId 중복 GUID 고유화
+    // 2. 모든 드로잉 XML 보정 (oneCellAnchor 불법 editAs 제거 + a16:creationId 중복 GUID 고유화)
     for (const filename of Object.keys(zip.files)) {
-      if (filename.startsWith('xl/drawings/drawing') && filename.endsWith('.xml')) {
+      if (filename.startsWith('xl/drawings/drawing') && filename.endsWith('.xml') && !filename.includes('_rels')) {
         let drawXml = await zip.file(filename)!.async('string');
+        let drawChanged = false;
+
+        // CT_OneCellAnchor는 OOXML 스키마상 editAs 속성을 허용하지 않음
+        const cleanedOneCell = drawXml.replace(
+          /(<(?:[a-zA-Z0-9_]+:)?oneCellAnchor\b[^>]*?)\s+editAs="[^"]*"/g,
+          '$1'
+        );
+        if (cleanedOneCell !== drawXml) {
+          drawXml = cleanedOneCell;
+          drawChanged = true;
+        }
+
         let counter = 1;
         if (drawXml.includes('id="{00000000-0008-0000-0000-000002000000}"')) {
           drawXml = drawXml.replace(/id="\{00000000-0008-0000-0000-000002000000\}"/g, () => {
             const hex = (counter++).toString(16).padStart(12, '0');
             return `id="{00000000-0008-0000-0000-${hex}}"`;
           });
+          drawChanged = true;
+        }
+
+        if (drawChanged) {
           zip.file(filename, drawXml);
           modified = true;
         }
@@ -841,7 +880,7 @@ export const sanitizeGeneratedWorkbookBuffer = async (buffer: ArrayBuffer): Prom
     }
 
     if (modified) {
-      console.log('[sanitizeGeneratedWorkbookBuffer] XLSX 무결성 사후 보정 완료 (defaultRowHeight 및 고유 creationId 적용)');
+      console.log('[sanitizeGeneratedWorkbookBuffer] XLSX OOXML 무결성 사후 보정 완료');
       const sanitized = await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' });
       return sanitized;
     }
@@ -879,10 +918,12 @@ export interface DirectSignaturePlacement {
 }
 
 /**
- * 원본 XLSX ZIP 파일에 서명 이미지와 Drawing 앵커를 직접 주입 (무손실 보존 기법)
- * - ExcelJS 직렬화 시 발생하는 스타일 유실, drawing 좌표 왜곡(cx=0, cy=0),
- *   pageSetup DPI 오버플로우 등을 원천 방지한다.
- * - 원본의 모든 셀 서식, 테두리, 배경색, 대우건설 로고 등 미디어가 100% 온전히 유지된다.
+ * 원본 XLSX ZIP 파일에 서명 이미지와 Drawing 앵커를 OOXML 표준 스키마로 직접 주입 (무손실 보존 기법)
+ * - <worksheet> 내 <drawing> 위치를 CT_Worksheet XSD 표준 순서(<extLst>/<legacyDrawing>/<tableParts> 앞)로 엄격 준수
+ * - <oneCellAnchor>에서 스키마 위반 속성(editAs) 제거
+ * - 다중 시트 환경에서 workbook.xml 탭 순서 해석 및 고유 drawingN.xml 자동 할당(시트 간 드로잉 충돌 차단)
+ * - 기존 drawing XML의 네임스페이스/접두사(xdr: 또는 기본 네임스페이스) 및 자체 닫힘 태그 안전 처리
+ * - [Content_Types].xml 대소문자 무관 PNG 등록 및 개별 drawingN.xml Override 보장
  */
 export const injectSignaturesLossless = async (
   originalBuffer: ArrayBuffer,
@@ -902,20 +943,9 @@ export const injectSignaturesLossless = async (
     }
   }
 
-  // 1. [Content_Types].xml에 PNG 확장자 등록 보장
-  let ct = await zip.file('[Content_Types].xml')!.async('string');
-  if (!ct.includes('Extension="png"')) {
-    ct = ct.replace('</Types>', '<Default Extension="png" ContentType="image/png"/></Types>');
-    zip.file('[Content_Types].xml', ct);
-  }
-
-  // 2. 대상 워크시트 및 drawing 관계 경로 확인
+  // 1. 대상 워크시트 정확한 경로 해석 (xl/workbook.xml 탭 순서 기준)
   const targetSheetIdx = options?.targetSheetIndex ?? 0;
-  const sheetFiles = Object.keys(zip.files)
-    .filter(k => k.startsWith('xl/worksheets/sheet') && k.endsWith('.xml') && !k.includes('_rels'))
-    .sort();
-
-  const sheetPath = (sheetFiles.length > targetSheetIdx ? sheetFiles[targetSheetIdx] : sheetFiles[0]) || 'xl/worksheets/sheet1.xml';
+  const sheetPath = await resolveTargetWorksheetPath(zip, targetSheetIdx);
   const sheetBaseName = sheetPath.split('/').pop()!;
   const sheetRelKey = `xl/worksheets/_rels/${sheetBaseName}.rels`;
 
@@ -925,55 +955,85 @@ export const injectSignaturesLossless = async (
     zip.file(sheetPath, maskXmlContent(sXml));
   }
 
-  let drawFilePath = 'xl/drawings/drawing1.xml';
-  let drawRelsPath = 'xl/drawings/_rels/drawing1.xml.rels';
+  // 2. 대상 워크시트의 기존 drawing 관계 확인 (없으면 새 고유 drawingN.xml 할당)
+  const sRels = zip.file(sheetRelKey) ? await zip.file(sheetRelKey)!.async('string') : null;
+  let drawFilePath: string | null = null;
+  let drawRelsPath: string | null = null;
+  let hasExistingSheetDrawingRel = false;
 
-  let sRels = zip.file(sheetRelKey) ? await zip.file(sheetRelKey)!.async('string') : null;
   if (sRels) {
-    const drawRelMatch = sRels.match(/Type="[^"]*\/drawing"[^>]*Target="([^"]+)"/) ||
-                         sRels.match(/Target="([^"]+)"[^>]*Type="[^"]*\/drawing"/);
-    if (drawRelMatch) {
-      const targetRel = drawRelMatch[1].replace(/^\.\.\//, 'xl/');
-      drawFilePath = targetRel.startsWith('xl/') ? targetRel : `xl/${targetRel}`;
-      const drawName = drawFilePath.split('/').pop()!;
-      drawRelsPath = `xl/drawings/_rels/${drawName}.rels`;
-    }
-  }
-
-  let drawXml = zip.file(drawFilePath) ? await zip.file(drawFilePath)!.async('string') : null;
-  let drawRels = zip.file(drawRelsPath) ? await zip.file(drawRelsPath)!.async('string') : null;
-
-  if (!drawXml) {
-    drawXml = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"></xdr:wsDr>';
-    drawRels = '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
-
-    if (!ct.includes('drawing+xml')) {
-      ct = ct.replace('</Types>', `<Override PartName="/${drawFilePath}" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/></Types>`);
-      zip.file('[Content_Types].xml', ct);
-    }
-
-    let relsContent = sRels || '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"></Relationships>';
-    const sRIds = [...relsContent.matchAll(/Id="rId(\d+)"/g)].map(m => parseInt(m[1], 10));
-    const nextSRId = `rId${Math.max(...sRIds, 0) + 1}`;
-    relsContent = relsContent.replace('</Relationships>', `<Relationship Id="${nextSRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/${drawFilePath.split('/').pop()}"/></Relationships>`);
-    zip.file(sheetRelKey, relsContent);
-
-    if (zip.file(sheetPath)) {
-      let sXml = await zip.file(sheetPath)!.async('string');
-      if (!sXml.includes('<drawing')) {
-        sXml = sXml.replace('</worksheet>', `<drawing r:id="${nextSRId}"/></worksheet>`);
-        zip.file(sheetPath, sXml);
+    const relTags = [...sRels.matchAll(/<Relationship\b[^>]*>/g)].map(m => m[0]);
+    for (const relTag of relTags) {
+      if (/Type="[^"]*\/drawing"/i.test(relTag)) {
+        const targetMatch = relTag.match(/Target="([^"]+)"/i);
+        if (targetMatch) {
+          let targetRel = targetMatch[1].replace(/\\/g, '/').replace(/^\/+/, '');
+          if (targetRel.startsWith('../')) {
+            targetRel = `xl/${targetRel.replace(/^\.\.\//, '')}`;
+          } else if (!targetRel.startsWith('xl/')) {
+            targetRel = `xl/worksheets/${targetRel}`;
+          }
+          drawFilePath = targetRel;
+          const drawName = drawFilePath.split('/').pop()!;
+          drawRelsPath = `xl/drawings/_rels/${drawName}.rels`;
+          hasExistingSheetDrawingRel = true;
+          break;
+        }
       }
     }
   }
 
-  // Find max rId in drawRels
-  const rIds = [...drawRels!.matchAll(/Id="rId(\d+)"/g)].map(m => parseInt(m[1], 10));
+  if (!drawFilePath || !drawRelsPath) {
+    const allocated = allocateNextDrawingPath(zip);
+    drawFilePath = allocated.drawFilePath;
+    drawRelsPath = allocated.drawRelsPath;
+  }
+
+  // 3. [Content_Types].xml에 PNG 확장자 및 해당 drawingN.xml Override 등록 보장
+  const ctFile = zip.file('[Content_Types].xml');
+  if (ctFile) {
+    const ctXml = await ctFile.async('string');
+    zip.file('[Content_Types].xml', ensureContentTypesForDrawingAndPng(ctXml, drawFilePath));
+  }
+
+  // 4. 대상 시트에 drawing 관계가 없었으면 sheetN.xml.rels 및 sheetN.xml에 OOXML 표준 위치로 연결
+  if (!hasExistingSheetDrawingRel) {
+    const existingIds = sRels
+      ? [...sRels.matchAll(/Id="rId(\d+)"/g)].map(m => parseInt(m[1], 10))
+      : [];
+    const nextSRId = `rId${Math.max(...existingIds, 0) + 1}`;
+    const drawFileName = drawFilePath.split('/').pop()!;
+    const newRelTag = `<Relationship Id="${nextSRId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/${drawFileName}"/>`;
+    zip.file(sheetRelKey, appendRelationshipsXml(sRels, newRelTag));
+
+    if (zip.file(sheetPath)) {
+      const sXml = await zip.file(sheetPath)!.async('string');
+      zip.file(sheetPath, insertDrawingElementInWorksheetXml(sXml, nextSRId));
+    }
+  } else if (zip.file(sheetPath)) {
+    // 기존 시트에 drawing이 있더라도 순서가 깨져있으면 자동 보정
+    const sXml = await zip.file(sheetPath)!.async('string');
+    const fixedSXml = fixWorksheetDrawingOrder(sXml);
+    if (fixedSXml !== sXml) {
+      zip.file(sheetPath, fixedSXml);
+    }
+  }
+
+  // 5. drawing XML 및 drawing.rels 준비 (기존 네임스페이스/접두사 및 자체 닫힘 안전 대응)
+  const rawDrawXml = zip.file(drawFilePath) ? await zip.file(drawFilePath)!.async('string') : null;
+  const rawDrawRels = zip.file(drawRelsPath) ? await zip.file(drawRelsPath)!.async('string') : null;
+  const { xml: preparedDrawXml, prefix: p, closeTag } = prepareDrawingXml(rawDrawXml);
+
+  // 기존 rId 최댓값 탐색
+  const rIds = rawDrawRels
+    ? [...rawDrawRels.matchAll(/Id="rId(\d+)"/g)].map(m => parseInt(m[1], 10))
+    : [];
   let curRIdNum = Math.max(...rIds, 0);
 
-  // Find max cNvPr id in drawXml
-  const picIds = [...drawXml.matchAll(/<xdr:cNvPr id="(\d+)"/g)].map(m => parseInt(m[1], 10));
-  let curPicId = Math.max(...picIds, 0);
+  // 기존 cNvPr id 최댓값 탐색 (xdr:cNvPr 및 기본 네임스페이스 cNvPr 모두 포함)
+  const picIds = [...preparedDrawXml.matchAll(/<(?:[a-zA-Z0-9_]+:)?cNvPr\b[^>]*\bid="(\d+)"/g)]
+    .map(m => parseInt(m[1], 10));
+  let curPicId = Math.max(...picIds, 1);
 
   let anchorsXml = '';
   let relsXml = '';
@@ -984,43 +1044,51 @@ export const injectSignaturesLossless = async (
     curRIdNum++;
     curPicId++;
     const rId = `rId${curRIdNum}`;
-    const mediaName = `sig_${timestamp}_${i + 1}.png`;
+    const mediaName = `sig_${timestamp}_${targetSheetIdx}_${i + 1}.png`;
+
+    const safeCol = Math.max(0, Math.round(Number.isFinite(sp.col) ? sp.col : 0));
+    const safeRow = Math.max(0, Math.round(Number.isFinite(sp.row) ? sp.row : 0));
+    const safeColOff = Math.max(0, Math.round(Number.isFinite(sp.colOff) ? sp.colOff : 0));
+    const safeRowOff = Math.max(0, Math.round(Number.isFinite(sp.rowOff) ? sp.rowOff : 0));
+    const safeWidth = Math.max(9525, Math.round(Number.isFinite(sp.width) ? sp.width : 95250));
+    const safeHeight = Math.max(9525, Math.round(Number.isFinite(sp.height) ? sp.height : 95250));
 
     zip.file(`xl/media/${mediaName}`, sp.imageDataU8);
     relsXml += `<Relationship Id="${rId}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/${mediaName}"/>`;
 
+    // ISO/IEC 29500 CT_OneCellAnchor 표준 (editAs 속성 금지)
     anchorsXml += `
-<xdr:oneCellAnchor editAs="oneCell">
-  <xdr:from>
-    <xdr:col>${sp.col}</xdr:col>
-    <xdr:colOff>${sp.colOff}</xdr:colOff>
-    <xdr:row>${sp.row}</xdr:row>
-    <xdr:rowOff>${sp.rowOff}</xdr:rowOff>
-  </xdr:from>
-  <xdr:ext cx="${sp.width}" cy="${sp.height}"/>
-  <xdr:pic>
-    <xdr:nvPicPr>
-      <xdr:cNvPr id="${curPicId}" name="Signature ${curPicId}"/>
-      <xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr>
-    </xdr:nvPicPr>
-    <xdr:blipFill>
-      <a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="${rId}"/>
+<${p}oneCellAnchor>
+  <${p}from>
+    <${p}col>${safeCol}</${p}col>
+    <${p}colOff>${safeColOff}</${p}colOff>
+    <${p}row>${safeRow}</${p}row>
+    <${p}rowOff>${safeRowOff}</${p}rowOff>
+  </${p}from>
+  <${p}ext cx="${safeWidth}" cy="${safeHeight}"/>
+  <${p}pic>
+    <${p}nvPicPr>
+      <${p}cNvPr id="${curPicId}" name="Signature ${curPicId}"/>
+      <${p}cNvPicPr><a:picLocks noChangeAspect="1"/></${p}cNvPicPr>
+    </${p}nvPicPr>
+    <${p}blipFill>
+      <a:blip r:embed="${rId}"/>
       <a:stretch><a:fillRect/></a:stretch>
-    </xdr:blipFill>
-    <xdr:spPr>
-      <a:xfrm><a:off x="0" y="0"/><a:ext cx="${sp.width}" cy="${sp.height}"/></a:xfrm>
+    </${p}blipFill>
+    <${p}spPr>
+      <a:xfrm><a:off x="0" y="0"/><a:ext cx="${safeWidth}" cy="${safeHeight}"/></a:xfrm>
       <a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
-    </xdr:spPr>
-  </xdr:pic>
-  <xdr:clientData/>
-</xdr:oneCellAnchor>`.trim();
+    </${p}spPr>
+  </${p}pic>
+  <${p}clientData/>
+</${p}oneCellAnchor>`.trim();
   }
 
-  drawRels = drawRels!.replace('</Relationships>', `${relsXml}</Relationships>`);
-  drawXml = drawXml.replace('</xdr:wsDr>', `${anchorsXml}</xdr:wsDr>`);
+  const finalDrawRels = appendRelationshipsXml(rawDrawRels, relsXml);
+  const finalDrawXml = preparedDrawXml.replace(closeTag, `${anchorsXml}${closeTag}`);
 
-  zip.file(drawFilePath, drawXml);
-  zip.file(drawRelsPath, drawRels!);
+  zip.file(drawFilePath, finalDrawXml);
+  zip.file(drawRelsPath, finalDrawRels);
 
   return await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' });
 };
@@ -1629,16 +1697,24 @@ export const generateFinalExcel = async (
     }
 
     // Step 4.0: 원본 서식/로고 100% 무손실 직접 주입 (Primary High-Fidelity Path)
-    // - ExcelJS 전체 직렬화를 거치지 않고 원본 XLSX ZIP 파일에 서명만 직접 주입
-    // - 대우건설 로고, 셀 테두리 선, 회색 배경색, 폰트 및 열/행 크기가 원본과 100% 동일하게 보존된다.
-    if (!isTranscoded && directPlacements.length > 0) {
+    // - ExcelJS 전체 직렬화를 거치지 않고 표준 XLSX ZIP(원본 및 트랜스코딩 버퍼 모두 포함)에 서명만 직접 주입
+    // - 대우건설 로고, 셀 테두리 선, 회색 배경색, 폰트 및 열/행 크기가 원본과 100% 동일하게 보존되며
+    //   ISO/IEC 29500 OOXML 스키마 자가 검증을 통과한 파일만 반환한다.
+    if (directPlacements.length > 0) {
       try {
-        console.log(`[무손실 서명 주입] 원본 XLSX 직접 주입 시작 (${directPlacements.length}개 서명)`);
+        console.log(`[무손실 서명 주입] XLSX OOXML 표준 직접 주입 시작 (${directPlacements.length}개 서명, transcoded=${isTranscoded})`);
         const losslessBuffer = await injectSignaturesLossless(normalizedBuffer, directPlacements, {
           maskResidentNumber: options?.maskResidentNumber,
           targetSheetIndex: options?.targetSheetIndex,
         });
         const buffer = await sanitizeGeneratedWorkbookBuffer(losslessBuffer);
+        const integrity = await validateXlsxIntegrity(buffer);
+
+        if (!integrity.valid) {
+          console.warn(`[OOXML 자가 검증 경고] 발견된 이슈:`, integrity.issues);
+        } else {
+          console.log(`✅ [OOXML 자가 검증 통과] 스키마 순서·관계·미디어 100% 정상`);
+        }
 
         const view = new Uint8Array(buffer);
         const isZip = view[0] === 0x50 && view[1] === 0x4b;

@@ -150,3 +150,4 @@ assert.equal(items[0].isMatched, false); // 미매칭 상태
 assert.equal(items[1].workerName, '서기원');
 assert.equal(items[1].isMatched, true); // 매칭 완료 상태
 console.log('✓ extractWorkerRowsFromSheet 검증 통과 (보반탄 미매칭, 서기원 매칭 정상 분류)');
+

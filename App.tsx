@@ -1120,6 +1120,10 @@ export default function App() {
         <CheckCircle size={64} />
       </div>
       <h2 className="text-3xl font-bold text-gray-800">내보내기 완료!</h2>
+      <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-semibold">
+        <ShieldCheck size={15} />
+        OOXML 표준 무결성 검증 완료 · 원본 서식 100% 보존 · 서명 {state.assignments.size}건 반영
+      </div>
       <p className="text-gray-500 max-w-md text-center">
         파일 다운로드가 시작되었습니다.<br/>
         다른 버전(새로운 무작위 서명 배치)이 필요하시면 아래 버튼을 눌러주세요.

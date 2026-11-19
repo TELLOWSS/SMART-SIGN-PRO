@@ -187,7 +187,8 @@ export const stripGhostRowsFromBuffer = async (
         let sheetXml = await zip.file(filename)!.async('string');
         let hasGhost = false;
 
-        const cleanedXml = sheetXml.replace(/<row r="(\d+)"[^>]*>[\s\S]*?<\/row>/g, (m, r) => {
+        // 자체 닫힘(<row r="500" .../>)과 일반(<row r="500">...</row>)을 안전하게 구분 매칭
+        let cleanedXml = sheetXml.replace(/<row\b[^>]*\br="(\d+)"[^>]*?(?:\/>|>[\s\S]*?<\/row>)/g, (m, r) => {
           if (parseInt(r, 10) > maxRow) {
             hasGhost = true;
             return '';
@@ -196,6 +197,17 @@ export const stripGhostRowsFromBuffer = async (
         });
 
         if (hasGhost) {
+          // dimension 범위의 끝 행도 maxRow로 안전 보정
+          cleanedXml = cleanedXml.replace(
+            /<dimension\s+ref="([A-Z]+)(\d+):([A-Z]+)(\d+)"\s*\/>/i,
+            (full, c1, r1, c2, r2) => {
+              const endRow = parseInt(r2, 10);
+              if (endRow > maxRow) {
+                return `<dimension ref="${c1}${r1}:${c2}${maxRow}"/>`;
+              }
+              return full;
+            }
+          );
           zip.file(filename, cleanedXml);
           modified = true;
         }
@@ -203,6 +215,18 @@ export const stripGhostRowsFromBuffer = async (
     }
 
     if (modified) {
+      // 유령 행 제거 시 오래된 calcChain 참조 충돌 방지 (Excel이 열 때 깨끗하게 재계산)
+      if (zip.file('xl/calcChain.xml')) {
+        zip.remove('xl/calcChain.xml');
+        if (zip.file('[Content_Types].xml')) {
+          const ctXml = await zip.file('[Content_Types].xml')!.async('string');
+          zip.file('[Content_Types].xml', ctXml.replace(/<Override\b[^>]*PartName="\/xl\/calcChain\.xml"[^>]*\/>/i, ''));
+        }
+        if (zip.file('xl/_rels/workbook.xml.rels')) {
+          const wbRels = await zip.file('xl/_rels/workbook.xml.rels')!.async('string');
+          zip.file('xl/_rels/workbook.xml.rels', wbRels.replace(/<Relationship\b[^>]*Target="[^"]*calcChain\.xml"[^>]*\/>/i, ''));
+        }
+      }
       console.log(`[stripGhostRowsFromBuffer] 유령 행(>${maxRow}) 선제 제거 완료`);
       return await zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' });
     }
@@ -361,18 +385,12 @@ export const maskIdentificationNumber = (value: string | number | null | undefin
     return str.replace(/^(\d{6})[-\s]([1-8])\*?$/, '$1-$2******');
   }
 
-  // 3. 영문+숫자 혼합 외국인등록번호 / 여권번호 형태 (예: E01109933, C9859552, P02535409, K0083508)
-  const foreignMatch = str.match(/^([A-Za-z]\d{2,3})(\d{3,8})$/);
+  // 3. 영문(1~2자리)+숫자(6~9자리) 외국인등록번호 / 여권번호 형태 (예: E01109933, C9859552, P02535409, K0083508)
+  const foreignMatch = str.match(/^([A-Za-z]{1,2}\d{2,3})(\d{3,8})$/);
   if (foreignMatch) {
     const prefix = foreignMatch[1];
     const suffix = foreignMatch[2];
     return prefix + '*'.repeat(suffix.length);
-  }
-
-  // 4. 일반적인 8자리 이상 주민/등록번호 패턴
-  if (/^[A-Za-z0-9]{8,14}$/.test(str)) {
-    const keepLen = Math.min(4, Math.floor(str.length / 2));
-    return str.slice(0, keepLen) + '*'.repeat(str.length - keepLen);
   }
 
   return str;
