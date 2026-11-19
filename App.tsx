@@ -1231,257 +1231,384 @@ export default function App() {
 
   // --- Render Steps ---
 
-  const renderUploadStep = () => (
-    <div className="w-full max-w-5xl mx-auto mt-8 px-4 pb-12 space-y-8">
-      {/* Hero Banner */}
-      <div className="text-center space-y-3">
-        <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-indigo-50 border border-indigo-200/80 text-indigo-700 text-xs font-semibold">
-          <Sparkles size={13} /> 건설·안전 현장 서명 자동화 스튜디오 v2.0
-        </div>
-        <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight">
-          엑셀 양식 그대로, 수기 서명 1초 자동화
-        </h2>
-        <p className="text-sm text-slate-500 max-w-2xl mx-auto">
-          원본 로고·테두리·서식을 100% 무손실 보존하며, 엑셀에 '1'을 적지 않아도 화면에서 원하는 품목과 근로자를 클릭해 서명할 수 있습니다.
-        </p>
-        <div className="flex flex-wrap items-center justify-center gap-2 pt-1 text-[11px] font-medium text-slate-600">
-          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white border border-slate-200 shadow-sm">
-            <ShieldCheck size={13} className="text-emerald-600" /> OOXML 무손실 원본 보존
-          </span>
-          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white border border-slate-200 shadow-sm">
-            <HardDrive size={13} className="text-indigo-600" /> 브라우저 서명 보관함 자동 저장
-          </span>
-          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white border border-slate-200 shadow-sm">
-            <Lock size={13} className="text-slate-600" /> 서버 전송 없음 (100% 로컬 처리)
-          </span>
-        </div>
-      </div>
+  const renderUploadStep = () => {
+    const signatureEntries = Array.from(state.signatures.entries());
+    const totalSigFiles = signatureEntries.reduce((sum, [, list]) => sum + list.length, 0);
+    const previewThumbs = signatureEntries.slice(0, 5);
+    const isReady = !!state.excelFile && state.signatures.size > 0;
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-      {/* Excel Upload Card (Drag & Drop 지원) */}
-      <div 
-        onDragOver={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          if (!isDraggingExcel) setIsDraggingExcel(true);
-        }}
-        onDragEnter={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          setIsDraggingExcel(true);
-        }}
-        onDragLeave={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-            setIsDraggingExcel(false);
-          }
-        }}
-        onDrop={async (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          setIsDraggingExcel(false);
-          const files = await extractFilesFromDataTransfer(e.dataTransfer);
-          const excelFile = files.find(f => /\.(xlsx|xls|csv|xlsm|xlsb)$/i.test(f.name));
-          if (excelFile) {
-            await processExcelFile(excelFile);
-          } else if (files.length > 0 && files.some(f => f.type.startsWith('image/') || /\.(png|jpe?g|webp|bmp)$/i.test(f.name))) {
-            setToast({ msg: '서명 이미지를 감지했습니다. 오른쪽 2번 서명 이미지 카드에 넣어주세요.', type: 'info' });
-          } else {
-            setError('엑셀 파일(.xlsx, .xls)을 끌어다 놓아주세요.');
-          }
-        }}
-        className={`relative bg-white p-8 rounded-2xl shadow-lg border-2 transition-all duration-200 ${
-          isDraggingExcel 
-            ? 'border-blue-500 bg-blue-50/70 scale-[1.02] ring-4 ring-blue-100' 
-            : state.excelFile 
-              ? 'border-green-500' 
-              : 'border-gray-100 hover:border-blue-300'
-        }`}
-      >
-        <div className="flex flex-col items-center text-center space-y-4">
-          <div className={`p-4 rounded-full transition-transform ${isDraggingExcel ? 'scale-110' : ''} ${state.excelFile ? 'bg-green-100 text-green-600' : 'bg-blue-50 text-blue-600'}`}>
-            <FileSpreadsheet size={48} />
+    return (
+      <div className="w-full max-w-[1040px] mx-auto pt-10 pb-16 px-4 sm:px-6 space-y-9 animate-fade-up">
+        {/* Editorial Hero Section */}
+        <div className="text-center space-y-4">
+          <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-white/90 border border-slate-200/80 shadow-sm text-[11px] font-semibold text-slate-700">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+            <span>SMART SIGN PRO · 2026 Studio Edition</span>
           </div>
-          <h3 className="text-xl font-bold text-gray-800">1. 엑셀 양식 업로드</h3>
-          <p className="text-gray-500 text-sm">
-            '성명'과 '1' 표시가 포함된 안전관리비/보호구 지급대장 엑셀 파일(.xlsx, .xls)을 업로드하세요.
-          </p>
-          
-          <label className="cursor-pointer bg-gray-900 text-white px-6 py-3 rounded-lg hover:bg-gray-800 transition-colors w-full">
-            <span className="flex items-center justify-center gap-2">
-              <Upload size={18} />
-              {state.excelFile ? '파일 변경' : '엑셀 파일 선택'}
+
+          <h2 className="text-3xl sm:text-[40px] font-extrabold text-slate-950 tracking-[-0.035em] leading-[1.18]">
+            엑셀 양식 그대로,{' '}
+            <span className="bg-gradient-to-r from-indigo-600 via-blue-600 to-violet-600 bg-clip-text text-transparent">
+              수기 서명 1초 완성
             </span>
-            <input 
-              key={`excel-input-${state.step}`} // Force reset input when step changes
-              ref={excelInputRef}
-              type="file" 
-              accept=".xlsx,.xls,.csv,.xlsm,.xlsb,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel" 
-              className="hidden" 
-              onChange={handleExcelUpload} 
-            />
-          </label>
+          </h2>
 
-          {/* Drag & Drop 유도 영역 */}
-          <div className={`w-full py-2.5 px-3 border border-dashed rounded-lg text-xs font-medium transition-colors ${
-            isDraggingExcel ? 'border-blue-500 text-blue-700 bg-blue-100/60' : 'border-gray-200 text-gray-500 bg-gray-50'
-          }`}>
-            {isDraggingExcel ? '🚀 여기에 엑셀 파일을 놓으세요!' : '🖱️ 탐색기에서 엑셀 파일을 여기로 끌어다 놓으셔도 됩니다.'}
-          </div>
-          
-          {state.excelFile && (
-            <div className="flex items-center gap-2 text-green-600 text-sm font-medium">
-              <CheckCircle size={16} />
-              {state.excelFile.name} 로드됨
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Signature Upload Card (Drag & Drop + 폴더 지원) */}
-      <div 
-        onDragOver={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          if (!isDraggingSig) setIsDraggingSig(true);
-        }}
-        onDragEnter={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          setIsDraggingSig(true);
-        }}
-        onDragLeave={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          if (!e.currentTarget.contains(e.relatedTarget as Node)) {
-            setIsDraggingSig(false);
-          }
-        }}
-        onDrop={async (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          setIsDraggingSig(false);
-          const files = await extractFilesFromDataTransfer(e.dataTransfer);
-          
-          const excelFile = files.find(f => /\.(xlsx|xls|csv|xlsm|xlsb)$/i.test(f.name));
-          if (excelFile && files.length === 1) {
-            setToast({ msg: '엑셀 파일을 감지했습니다. 왼쪽 1번 엑셀 양식 카드에 넣어주세요.', type: 'info' });
-            return;
-          }
-
-          if (files.length === 0) {
-            setError('폴더가 비어있거나 읽을 수 있는 이미지 파일이 없습니다.');
-            return;
-          }
-
-          await processSignatureFiles(files);
-        }}
-        className={`relative bg-white p-8 rounded-2xl shadow-lg border-2 transition-all duration-200 ${
-          isDraggingSig 
-            ? 'border-purple-500 bg-purple-50/70 scale-[1.02] ring-4 ring-purple-100' 
-            : state.signatures.size > 0 
-              ? 'border-green-500' 
-              : 'border-gray-100 hover:border-purple-300'
-        }`}
-      >
-        <div className="flex flex-col items-center text-center space-y-4">
-          <div className={`p-4 rounded-full transition-transform ${isDraggingSig ? 'scale-110' : ''} ${state.signatures.size > 0 ? 'bg-green-100 text-green-600' : 'bg-purple-50 text-purple-600'}`}>
-            <ImageIcon size={48} />
-          </div>
-          <h3 className="text-xl font-bold text-gray-800">2. 서명 이미지 / 폴더 업로드</h3>
-          <p className="text-gray-500 text-sm">
-            수기 서명 이미지 파일(예: 홍길동_1.png) 또는 <strong>서명 폴더를 통째로</strong> 추가하세요.
+          <p className="text-sm sm:text-[15px] text-slate-500 max-w-xl mx-auto leading-relaxed font-medium">
+            원본 로고·테두리·서식을 100% 무손실 보존합니다. 엑셀에 '1'을 적지 않아도
+            화면에서 원하는 품목과 근로자를 클릭해 바로 서명하세요.
           </p>
-          
-          {/* 개별 파일 추가 & 폴더 통째로 선택 버튼 그룹 */}
-          <div className="grid grid-cols-2 gap-2 w-full">
-            <label className="cursor-pointer bg-gray-900 text-white px-3 py-3 rounded-lg hover:bg-gray-800 transition-colors text-center">
-              <span className="flex items-center justify-center gap-1.5 text-sm font-medium">
-                <Upload size={16} />
-                이미지 파일
-              </span>
-              <input 
-                key={`sig-input-${state.step}`} // Force reset input when step changes
-                ref={sigInputRef}
-                type="file" 
-                accept="image/*" 
-                multiple 
-                className="hidden" 
-                onChange={handleSignatureUpload} 
-              />
-            </label>
 
-            <label className="cursor-pointer bg-purple-700 text-white px-3 py-3 rounded-lg hover:bg-purple-800 transition-colors text-center">
-              <span className="flex items-center justify-center gap-1.5 text-sm font-medium">
-                <FolderUp size={16} />
-                폴더 통째로
-              </span>
-              <input 
-                key={`sig-folder-input-${state.step}`}
-                ref={sigFolderInputRef}
-                type="file" 
-                {...({ webkitdirectory: "", directory: "" } as any)}
-                multiple 
-                className="hidden" 
-                onChange={handleFolderUpload} 
-              />
-            </label>
-
-            <button
-              type="button"
-              onClick={() => {
-                setSignaturePadTargetWorker('');
-                setIsSignaturePadOpen(true);
-              }}
-              className="col-span-2 cursor-pointer bg-indigo-50 border border-indigo-200 text-indigo-700 px-3 py-2.5 rounded-lg hover:bg-indigo-100 transition-colors text-center flex items-center justify-center gap-1.5 text-xs font-semibold"
-            >
-              <PenTool size={14} /> 현장 즉석 수기 서명 패드 (Canvas)
-            </button>
+          {/* Subtle Trust Metric Strip */}
+          <div className="flex flex-wrap items-center justify-center gap-2 pt-1 text-[11px] font-semibold text-slate-600">
+            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/80 border border-slate-200/70">
+              <ShieldCheck size={13} className="text-emerald-600" /> OOXML 무손실 원본 보존
+            </span>
+            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/80 border border-slate-200/70">
+              <HardDrive size={13} className="text-indigo-600" /> 브라우저 서명 보관함 자동 저장
+            </span>
+            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/80 border border-slate-200/70">
+              <Lock size={13} className="text-slate-700" /> 서버 전송 없음 · 100% 로컬 처리
+            </span>
           </div>
+        </div>
 
-          {/* Drag & Drop 유도 영역 */}
-          <div className={`w-full py-2.5 px-3 border border-dashed rounded-lg text-xs font-medium transition-colors ${
-            isDraggingSig ? 'border-purple-500 text-purple-700 bg-purple-100/60' : 'border-gray-200 text-gray-500 bg-gray-50'
-          }`}>
-            {isDraggingSig ? '🚀 여기에 서명 폴더나 이미지들을 놓으세요!' : '📁 탐색기에서 서명 폴더를 통째로 여기로 끌어다 놓으셔도 됩니다.'}
-          </div>
-          
-          {state.signatures.size > 0 && (
-            <div className="w-full pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-1.5 text-emerald-700 text-xs font-semibold">
-                <CheckCircle size={15} />
-                <span>
-                  {state.signatures.size}명 확인됨 ({Array.from(state.signatures.values()).flat().length}개 파일)
-                  {vaultRestoredCount > 0 && ' · 보관함 자동 복원'}
+        {/* Bento 2-Column Studio Dropzones */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+          {/* STEP 01: Excel Form Card */}
+          <div
+            onDragOver={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (!isDraggingExcel) setIsDraggingExcel(true);
+            }}
+            onDragEnter={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setIsDraggingExcel(true);
+            }}
+            onDragLeave={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                setIsDraggingExcel(false);
+              }
+            }}
+            onDrop={async (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setIsDraggingExcel(false);
+              const files = await extractFilesFromDataTransfer(e.dataTransfer);
+              const excelFile = files.find(f => /\.(xlsx|xls|csv|xlsm|xlsb)$/i.test(f.name));
+              if (excelFile) {
+                await processExcelFile(excelFile);
+              } else if (files.length > 0 && files.some(f => f.type.startsWith('image/') || /\.(png|jpe?g|webp|bmp)$/i.test(f.name))) {
+                setToast({ msg: '서명 이미지를 감지했습니다. 오른쪽 02 서명 카드에 놓아주세요.', type: 'info' });
+              } else {
+                setError('엑셀 파일(.xlsx, .xls)을 끌어다 놓아주세요.');
+              }
+            }}
+            className={`ceramic-card rounded-3xl p-6 sm:p-7 flex flex-col justify-between transition-all duration-200 ${
+              isDraggingExcel
+                ? '!border-indigo-500 ring-4 ring-indigo-500/15 scale-[1.01]'
+                : state.excelFile
+                  ? '!border-emerald-400/70'
+                  : ''
+            }`}
+          >
+            <div className="space-y-5">
+              {/* Top Step Meta */}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className={`w-10 h-10 rounded-2xl flex items-center justify-center transition-colors ${
+                    state.excelFile
+                      ? 'bg-emerald-500 text-white shadow-sm shadow-emerald-500/25'
+                      : 'bg-slate-900 text-white shadow-sm'
+                  }`}>
+                    <FileSpreadsheet size={20} />
+                  </div>
+                  <div>
+                    <div className="text-[10px] font-bold tracking-widest uppercase text-slate-400">STEP 01</div>
+                    <h3 className="text-base font-bold text-slate-900 leading-tight">엑셀 양식 업로드</h3>
+                  </div>
+                </div>
+                <span className={`px-2.5 py-1 rounded-full text-[11px] font-bold ${
+                  state.excelFile
+                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                    : 'bg-slate-100 text-slate-500'
+                }`}>
+                  {state.excelFile ? '준비 완료' : '대기 중'}
                 </span>
               </div>
-              <button
-                type="button"
-                onClick={handleClearVault}
-                className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-rose-600 hover:bg-rose-50 transition-colors"
-                title="브라우저에 자동 저장된 서명 보관함을 비웁니다"
+
+              <p className="text-xs text-slate-500 leading-relaxed">
+                보호구 지급대장·공사참여자 실명부·안전교육일지 등 <strong className="text-slate-700 font-semibold">모든 .xlsx / .xls 양식</strong>을 지원합니다.
+              </p>
+
+              {/* Sleek Interactive Dropzone */}
+              <label
+                className={`group block cursor-pointer rounded-2xl border-[1.5px] border-dashed p-6 text-center transition-all ${
+                  isDraggingExcel
+                    ? 'border-indigo-500 bg-indigo-50/70'
+                    : state.excelFile
+                      ? 'border-emerald-300 bg-emerald-50/35 hover:bg-emerald-50/60'
+                      : 'border-slate-300/90 bg-slate-50/70 hover:border-indigo-400 hover:bg-indigo-50/30'
+                }`}
               >
-                <Trash2 size={12} /> 보관함 비우기
-              </button>
+                <div className="flex flex-col items-center gap-2.5">
+                  <div className={`w-11 h-11 rounded-2xl flex items-center justify-center transition-transform group-hover:-translate-y-0.5 ${
+                    state.excelFile
+                      ? 'bg-white text-emerald-600 shadow-sm border border-emerald-200'
+                      : 'bg-white text-slate-700 shadow-sm border border-slate-200/80'
+                  }`}>
+                    {state.excelFile ? <CheckCircle size={22} /> : <Upload size={20} />}
+                  </div>
+
+                  {state.excelFile ? (
+                    <div className="space-y-1">
+                      <p className="text-sm font-bold text-slate-900 break-all">{state.excelFile.name}</p>
+                      <p className="text-[11px] font-medium text-emerald-700">
+                        {state.sheetData?.rows.length || 0}행 · {state.availableSheets.length || 1}개 시트 로드됨 · 클릭하여 변경
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-1">
+                      <p className="text-sm font-semibold text-slate-800">
+                        {isDraggingExcel ? '여기에 엑셀 파일을 놓으세요' : '파일을 끌어다 놓거나 클릭해 선택'}
+                      </p>
+                      <p className="text-[11px] text-slate-400">.xlsx, .xls, .xlsm, .csv 지원</p>
+                    </div>
+                  )}
+                </div>
+                <input
+                  key={`excel-input-${state.step}`}
+                  ref={excelInputRef}
+                  type="file"
+                  accept=".xlsx,.xls,.csv,.xlsm,.xlsb,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+                  className="hidden"
+                  onChange={handleExcelUpload}
+                />
+              </label>
             </div>
+
+            <div className="mt-5 pt-4 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-400">
+              <span>다중 시트 · 병합셀 · 회사 로고 100% 유지</span>
+              <span className="font-semibold text-slate-500">OOXML v2</span>
+            </div>
+          </div>
+
+          {/* STEP 02: Signature Library Card */}
+          <div
+            onDragOver={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (!isDraggingSig) setIsDraggingSig(true);
+            }}
+            onDragEnter={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setIsDraggingSig(true);
+            }}
+            onDragLeave={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (!e.currentTarget.contains(e.relatedTarget as Node)) {
+                setIsDraggingSig(false);
+              }
+            }}
+            onDrop={async (e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              setIsDraggingSig(false);
+              const files = await extractFilesFromDataTransfer(e.dataTransfer);
+
+              const excelFile = files.find(f => /\.(xlsx|xls|csv|xlsm|xlsb)$/i.test(f.name));
+              if (excelFile && files.length === 1) {
+                setToast({ msg: '엑셀 파일을 감지했습니다. 왼쪽 01 엑셀 양식 카드에 놓아주세요.', type: 'info' });
+                return;
+              }
+
+              if (files.length === 0) {
+                setError('폴더가 비어있거나 읽을 수 있는 이미지 파일이 없습니다.');
+                return;
+              }
+
+              await processSignatureFiles(files);
+            }}
+            className={`ceramic-card rounded-3xl p-6 sm:p-7 flex flex-col justify-between transition-all duration-200 ${
+              isDraggingSig
+                ? '!border-indigo-500 ring-4 ring-indigo-500/15 scale-[1.01]'
+                : state.signatures.size > 0
+                  ? '!border-emerald-400/70'
+                  : ''
+            }`}
+          >
+            <div className="space-y-5">
+              {/* Top Step Meta */}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2.5">
+                  <div className={`w-10 h-10 rounded-2xl flex items-center justify-center transition-colors ${
+                    state.signatures.size > 0
+                      ? 'bg-emerald-500 text-white shadow-sm shadow-emerald-500/25'
+                      : 'bg-indigo-600 text-white shadow-sm shadow-indigo-600/25'
+                  }`}>
+                    <ImageIcon size={20} />
+                  </div>
+                  <div>
+                    <div className="text-[10px] font-bold tracking-widest uppercase text-slate-400">STEP 02</div>
+                    <h3 className="text-base font-bold text-slate-900 leading-tight">수기 서명 라이브러리</h3>
+                  </div>
+                </div>
+                <span className={`px-2.5 py-1 rounded-full text-[11px] font-bold ${
+                  state.signatures.size > 0
+                    ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                    : 'bg-slate-100 text-slate-500'
+                }`}>
+                  {state.signatures.size > 0 ? `${state.signatures.size}명 보관 중` : '대기 중'}
+                </span>
+              </div>
+
+              <p className="text-xs text-slate-500 leading-relaxed">
+                서명 이미지 또는 <strong className="text-slate-700 font-semibold">폴더를 통째로 끌어다 놓으세요.</strong> 브라우저에 자동 저장되어 다음 작업 시 즉시 복원됩니다.
+              </p>
+
+              {/* Unified Sleek Action Grid */}
+              <div className="grid grid-cols-2 gap-2">
+                <label className="cursor-pointer bg-slate-900 hover:bg-slate-800 active:scale-[0.98] text-white px-3.5 py-2.5 rounded-xl transition-all text-center shadow-sm">
+                  <span className="flex items-center justify-center gap-1.5 text-xs font-semibold">
+                    <Upload size={14} /> 이미지 선택
+                  </span>
+                  <input
+                    key={`sig-input-${state.step}`}
+                    ref={sigInputRef}
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    className="hidden"
+                    onChange={handleSignatureUpload}
+                  />
+                </label>
+
+                <label className="cursor-pointer bg-indigo-600 hover:bg-indigo-700 active:scale-[0.98] text-white px-3.5 py-2.5 rounded-xl transition-all text-center shadow-sm shadow-indigo-600/20">
+                  <span className="flex items-center justify-center gap-1.5 text-xs font-semibold">
+                    <FolderUp size={14} /> 폴더 통째로
+                  </span>
+                  <input
+                    key={`sig-folder-input-${state.step}`}
+                    ref={sigFolderInputRef}
+                    type="file"
+                    {...({ webkitdirectory: "", directory: "" } as any)}
+                    multiple
+                    className="hidden"
+                    onChange={handleFolderUpload}
+                  />
+                </label>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSignaturePadTargetWorker('');
+                    setIsSignaturePadOpen(true);
+                  }}
+                  className="col-span-2 cursor-pointer bg-slate-50 hover:bg-indigo-50/80 active:scale-[0.99] border border-slate-200 hover:border-indigo-300 text-slate-800 hover:text-indigo-700 px-3.5 py-2.5 rounded-xl transition-all flex items-center justify-center gap-1.5 text-xs font-semibold"
+                >
+                  <PenTool size={14} className="text-indigo-600" /> 현장 즉석 수기 서명 패드 (터치·마우스)
+                </button>
+              </div>
+
+              {/* Live Signature Thumbnail Preview Strip OR Drop Hint */}
+              {previewThumbs.length > 0 ? (
+                <div className="rounded-2xl bg-slate-50/90 border border-slate-200/80 p-3 space-y-2">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="font-semibold text-slate-600">
+                      등록된 서명 미리보기 ({totalSigFiles}개 파일)
+                    </span>
+                    {vaultRestoredCount > 0 && (
+                      <span className="inline-flex items-center gap-1 text-indigo-600 font-semibold">
+                        <HardDrive size={11} /> 자동 복원
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-2 overflow-x-auto pb-0.5">
+                    {previewThumbs.map(([name, files]) => (
+                      <div
+                        key={`thumb-${name}`}
+                        className="flex-shrink-0 w-16 bg-white rounded-xl border border-slate-200/80 p-1.5 flex flex-col items-center gap-1 shadow-xs"
+                      >
+                        <div className="w-full h-8 flex items-center justify-center overflow-hidden">
+                          <img
+                            src={files[0].previewUrl}
+                            alt={name}
+                            className="max-h-full max-w-full object-contain mix-blend-multiply"
+                          />
+                        </div>
+                        <span className="text-[10px] font-semibold text-slate-600 truncate w-full text-center">
+                          {name}
+                        </span>
+                      </div>
+                    ))}
+                    {signatureEntries.length > 5 && (
+                      <div className="flex-shrink-0 px-2.5 py-3 rounded-xl bg-slate-200/70 text-[11px] font-bold text-slate-600">
+                        +{signatureEntries.length - 5}명
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div className={`w-full py-3 px-4 border-[1.5px] border-dashed rounded-2xl text-xs font-medium text-center transition-colors ${
+                  isDraggingSig ? 'border-indigo-500 text-indigo-700 bg-indigo-50/80' : 'border-slate-300/80 text-slate-400 bg-slate-50/60'
+                }`}>
+                  {isDraggingSig ? '여기에 서명 폴더나 이미지를 놓으세요' : '탐색기에서 서명 폴더를 통째로 끌어다 놓아도 됩니다'}
+                </div>
+              )}
+            </div>
+
+            <div className="mt-5 pt-4 border-t border-slate-100 flex items-center justify-between text-[11px]">
+              <span className="text-slate-400">PNG · JPG · 여백 자동 제거</span>
+              {state.signatures.size > 0 && (
+                <button
+                  type="button"
+                  onClick={handleClearVault}
+                  className="inline-flex items-center gap-1 text-rose-500 hover:text-rose-700 font-semibold transition-colors"
+                >
+                  <Trash2 size={12} /> 보관함 비우기
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Primary Studio Launch CTA */}
+        <div className="flex flex-col items-center gap-2.5 pt-2">
+          <button
+            onClick={() => runAutoMatch()}
+            disabled={!isReady || processing}
+            className={`group px-10 py-4 rounded-2xl text-[15px] font-bold flex items-center gap-3 transition-all duration-200 active:scale-[0.98] ${
+              isReady
+                ? 'bg-gradient-to-r from-slate-900 via-indigo-950 to-indigo-700 text-white shadow-xl shadow-indigo-900/20 hover:shadow-2xl hover:shadow-indigo-700/30 hover:-translate-y-0.5'
+                : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+            }`}
+          >
+            {processing ? (
+              <RefreshCw className="animate-spin" size={19} />
+            ) : (
+              <Sparkles size={18} className={isReady ? 'text-indigo-300' : 'text-slate-400'} />
+            )}
+            <span>서명 스튜디오 열기</span>
+            <ArrowRight size={18} className="transition-transform group-hover:translate-x-1" />
+          </button>
+          {!isReady && (
+            <p className="text-xs text-slate-400 font-medium">
+              {!state.excelFile && state.signatures.size === 0
+                ? '01 엑셀 양식과 02 서명 이미지를 먼저 준비해 주세요'
+                : !state.excelFile
+                  ? '왼쪽 01 카드에 엑셀 양식을 끌어다 놓아주세요'
+                  : '오른쪽 02 카드에 서명 폴더를 추가해 주세요'}
+            </p>
           )}
         </div>
       </div>
-      </div>
-
-      <div className="flex justify-center pt-2">
-        <button 
-          onClick={() => runAutoMatch()}
-          disabled={!state.excelFile || state.signatures.size === 0 || processing}
-          className="bg-indigo-600 text-white px-10 py-4 rounded-2xl text-base font-bold shadow-lg shadow-indigo-200 hover:bg-indigo-700 hover:shadow-xl disabled:opacity-45 disabled:shadow-none disabled:cursor-not-allowed flex items-center gap-3 transition-all"
-        >
-          {processing ? <RefreshCw className="animate-spin" size={20} /> : <ArrowRight size={20} />}
-          자동 매칭 및 미리보기 시작
-        </button>
-      </div>
-    </div>
-  );
+    );
+  };
 
   const renderPreviewStep = () => {
     if (!state.sheetData) return null;
@@ -1538,52 +1665,64 @@ export default function App() {
   };
 
   const renderExportStep = () => (
-    <div className="flex flex-col items-center justify-center h-[60vh] space-y-6">
-      <div className="bg-green-100 p-6 rounded-full text-green-600 mb-4 animate-bounce-slow">
-        <CheckCircle size={64} />
-      </div>
-      <h2 className="text-3xl font-bold text-gray-800">내보내기 완료!</h2>
-      <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-emerald-50 border border-emerald-200 text-emerald-700 text-xs font-semibold">
-        <ShieldCheck size={15} />
-        OOXML 표준 무결성 검증 완료 · 원본 서식 100% 보존 · 서명 {state.assignments.size}건 반영
-      </div>
-      <p className="text-gray-500 max-w-md text-center">
-        파일 다운로드가 시작되었습니다.<br/>
-        다른 버전(새로운 무작위 서명 배치)이 필요하시면 아래 버튼을 눌러주세요.
-      </p>
-      <div className="flex gap-4 mt-8">
-        <button 
-          onClick={handleBackToPreview}
-          className="bg-white border border-gray-300 text-gray-700 px-6 py-3 rounded-xl font-medium hover:bg-gray-50 flex items-center gap-2"
-        >
-          <Settings size={18} />
-          편집 화면으로 돌아가기
-        </button>
-        <button 
-          onClick={() => handleExport(true)}
-          className="bg-indigo-600 text-white px-6 py-3 rounded-xl font-medium hover:bg-indigo-700 flex items-center gap-2 shadow-lg"
-        >
-          <Copy size={18} />
-          다른 랜덤 버전 즉시 다운로드
-        </button>
-        <button
-          onClick={handleReset}
-          className="bg-white border border-slate-300 text-slate-700 px-6 py-3 rounded-xl font-medium hover:bg-slate-50 flex items-center gap-2"
-        >
-          <RotateCcw size={18} />
-          처음으로 돌아가기
-        </button>
+    <div className="flex flex-col items-center justify-center min-h-[72vh] px-4 animate-fade-up">
+      <div className="ceramic-card rounded-3xl p-8 sm:p-10 max-w-xl w-full text-center space-y-6">
+        <div className="mx-auto w-16 h-16 rounded-2xl bg-gradient-to-br from-emerald-500 to-teal-600 text-white flex items-center justify-center shadow-lg shadow-emerald-500/25">
+          <CheckCircle size={34} strokeWidth={2.5} />
+        </div>
+
+        <div className="space-y-2">
+          <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-950 tracking-tight">
+            파일 생성이 완료되었습니다
+          </h2>
+          <p className="text-sm text-slate-500">
+            다운로드가 자동으로 시작되었습니다. 원본 엑셀의 로고와 서식이 그대로 보존되었습니다.
+          </p>
+        </div>
+
+        <div className="inline-flex flex-wrap items-center justify-center gap-2 px-4 py-2 rounded-2xl bg-emerald-50/80 border border-emerald-200/80 text-emerald-800 text-xs font-semibold">
+          <ShieldCheck size={15} className="text-emerald-600" />
+          <span>OOXML 무결성 검증 완료 · 원본 서식 100% 보존 · 서명 {state.assignments.size}건 반영</span>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-2">
+          <button
+            onClick={handleBackToPreview}
+            className="bg-white border border-slate-200 text-slate-700 px-5 py-3 rounded-xl text-xs font-semibold hover:bg-slate-50 flex items-center justify-center gap-2 transition-all"
+          >
+            <Settings size={15} />
+            스튜디오로 돌아가기
+          </button>
+          <button
+            onClick={() => handleExport(true)}
+            className="bg-slate-900 hover:bg-indigo-700 text-white px-5 py-3 rounded-xl text-xs font-bold flex items-center justify-center gap-2 shadow-md transition-all"
+          >
+            <Copy size={15} />
+            다른 랜덤 버전 즉시 저장
+          </button>
+          <button
+            onClick={handleReset}
+            className="sm:col-span-2 bg-slate-100/80 hover:bg-slate-200/70 text-slate-700 px-5 py-2.5 rounded-xl text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
+          >
+            <RotateCcw size={14} />
+            다음 엑셀 파일 작업하기 (보관된 서명 유지)
+          </button>
+        </div>
       </div>
     </div>
   );
 
   return (
-    <div className="min-h-screen bg-gray-50 text-gray-900 font-sans">
-      {/* Toast */}
+    <div className="min-h-screen studio-mesh-bg text-slate-900">
+      {/* Floating Glass Toast */}
       {toast && (
-        <div className="fixed top-20 right-4 z-[100] bg-gray-800 text-white px-6 py-3 rounded-lg shadow-xl flex items-center gap-3 animate-fade-in-down">
-          {toast.type === 'success' ? <CheckCircle size={20} className="text-green-400"/> : <Settings size={20} className="text-blue-400"/>}
-          {toast.msg}
+        <div className="fixed bottom-6 right-6 z-[100] bg-slate-900/95 backdrop-blur-xl text-white px-5 py-3.5 rounded-2xl shadow-2xl border border-white/10 flex items-center gap-3 text-xs font-semibold animate-fade-up max-w-md">
+          {toast.type === 'success' ? (
+            <CheckCircle size={17} className="text-emerald-400 flex-shrink-0" />
+          ) : (
+            <Sparkles size={17} className="text-indigo-400 flex-shrink-0" />
+          )}
+          <span className="leading-snug">{toast.msg}</span>
         </div>
       )}
 

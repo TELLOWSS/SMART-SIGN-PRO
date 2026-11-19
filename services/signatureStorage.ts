@@ -155,3 +155,4 @@ export const clearSignatureVault = async (): Promise<void> => {
     }
   });
 };
+

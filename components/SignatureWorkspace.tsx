@@ -169,49 +169,49 @@ export default function SignatureWorkspace(props: SignatureWorkspaceProps) {
   };
 
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-[356px_1fr] gap-4 h-[calc(100vh-72px)] p-4 bg-slate-100/90">
-      {/* LEFT CONTROL PANEL */}
-      <aside className="bg-white rounded-2xl shadow-sm border border-slate-200/90 flex flex-col overflow-hidden">
+    <div className="grid grid-cols-1 xl:grid-cols-[352px_1fr] gap-3.5 h-[calc(100vh-64px)] p-3.5 bg-transparent animate-fade-up">
+      {/* LEFT STUDIO CONTROL RAIL */}
+      <aside className="ceramic-card rounded-3xl flex flex-col overflow-hidden">
         {/* Scrollable Settings Area */}
-        <div className="p-4 flex-1 overflow-y-auto space-y-3.5">
-          {/* Quick Summary KPI Strip */}
+        <div className="p-4 flex-1 overflow-y-auto space-y-4">
+          {/* Minimal Studio KPI Strip */}
           <div className="grid grid-cols-3 gap-2">
-            <div className="bg-slate-50 border border-slate-200/80 rounded-xl px-2.5 py-2 text-center">
-              <div className="text-[10px] font-medium text-slate-500">근로자</div>
-              <div className="text-sm font-bold text-slate-900">{totalWorkersCount}명</div>
+            <div className="bg-slate-900/[0.03] border border-slate-200/70 rounded-2xl px-2.5 py-2.5 text-center">
+              <div className="text-[10px] font-semibold text-slate-400">근로자</div>
+              <div className="text-[15px] font-extrabold text-slate-900 tracking-tight">{totalWorkersCount}<span className="text-[11px] font-semibold text-slate-400 ml-0.5">명</span></div>
             </div>
-            <div className="bg-indigo-50/70 border border-indigo-200/70 rounded-xl px-2.5 py-2 text-center">
-              <div className="text-[10px] font-medium text-indigo-700">배치 서명</div>
-              <div className="text-sm font-bold text-indigo-700">{assignmentCount}건</div>
+            <div className="bg-indigo-50/70 border border-indigo-200/60 rounded-2xl px-2.5 py-2.5 text-center">
+              <div className="text-[10px] font-semibold text-indigo-600/80">배치 서명</div>
+              <div className="text-[15px] font-extrabold text-indigo-700 tracking-tight">{assignmentCount}<span className="text-[11px] font-semibold text-indigo-400 ml-0.5">건</span></div>
             </div>
-            <div className={`border rounded-xl px-2.5 py-2 text-center ${unmatchedWorkerCount > 0 ? 'bg-amber-50 border-amber-200' : 'bg-emerald-50 border-emerald-200'}`}>
-              <div className={`text-[10px] font-medium ${unmatchedWorkerCount > 0 ? 'text-amber-700' : 'text-emerald-700'}`}>미서명</div>
-              <div className={`text-sm font-bold ${unmatchedWorkerCount > 0 ? 'text-amber-700' : 'text-emerald-700'}`}>{unmatchedWorkerCount}명</div>
+            <div className={`border rounded-2xl px-2.5 py-2.5 text-center ${unmatchedWorkerCount > 0 ? 'bg-amber-50/80 border-amber-200/80' : 'bg-emerald-50/80 border-emerald-200/80'}`}>
+              <div className={`text-[10px] font-semibold ${unmatchedWorkerCount > 0 ? 'text-amber-700/80' : 'text-emerald-700/80'}`}>미서명</div>
+              <div className={`text-[15px] font-extrabold tracking-tight ${unmatchedWorkerCount > 0 ? 'text-amber-700' : 'text-emerald-700'}`}>{unmatchedWorkerCount}<span className="text-[11px] font-semibold opacity-60 ml-0.5">명</span></div>
             </div>
           </div>
 
-          {/* 1. 서명 배치 위치 모드 */}
-          <div className="bg-indigo-50/60 border border-indigo-200/80 rounded-xl p-3 space-y-2">
-            <div className="flex items-center justify-between text-xs text-indigo-950">
-              <span className="flex items-center gap-1.5 font-semibold">
-                <Crosshair size={14} className="text-indigo-600" /> 서명 배치 모드
+          {/* 1. 서명 배치 모드 (Apple/Linear Segmented Control) */}
+          <div className="space-y-2 pt-1">
+            <div className="flex items-center justify-between text-xs text-slate-900">
+              <span className="flex items-center gap-1.5 font-bold">
+                <Crosshair size={13} className="text-indigo-600" /> 서명 배치 모드
               </span>
               {detectedSignatureColLabel && (
-                <span className="px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 text-[10px] font-bold">
+                <span className="px-2 py-0.5 rounded-full bg-indigo-50 border border-indigo-200/70 text-indigo-700 text-[10px] font-bold">
                   [{detectedSignatureColLabel}] 열 감지
                 </span>
               )}
             </div>
 
-            <div className="grid grid-cols-3 gap-1 text-[11px]">
+            <div className="grid grid-cols-3 gap-1 p-1 rounded-xl bg-slate-100/90 border border-slate-200/70 text-[11px]">
               <button
                 type="button"
                 onClick={() => onPlacementModeChange('auto')}
                 disabled={processing}
-                className={`py-1.5 px-1.5 rounded-lg font-medium transition-all ${
+                className={`py-1.5 px-1.5 rounded-lg font-semibold transition-all ${
                   placementMode === 'auto'
-                    ? 'bg-indigo-600 text-white font-semibold shadow-sm'
-                    : 'bg-white border border-indigo-200 text-slate-700 hover:bg-indigo-50'
+                    ? 'bg-white text-slate-950 shadow-sm ring-1 ring-slate-900/5'
+                    : 'text-slate-500 hover:text-slate-800'
                 }`}
               >
                 품목+서명
@@ -220,10 +220,10 @@ export default function SignatureWorkspace(props: SignatureWorkspaceProps) {
                 type="button"
                 onClick={() => onPlacementModeChange('signatureColumnOnly')}
                 disabled={processing}
-                className={`py-1.5 px-1.5 rounded-lg font-medium transition-all ${
+                className={`py-1.5 px-1.5 rounded-lg font-semibold transition-all ${
                   placementMode === 'signatureColumnOnly'
-                    ? 'bg-indigo-600 text-white font-semibold shadow-sm'
-                    : 'bg-white border border-indigo-200 text-slate-700 hover:bg-indigo-50'
+                    ? 'bg-white text-slate-950 shadow-sm ring-1 ring-slate-900/5'
+                    : 'text-slate-500 hover:text-slate-800'
                 }`}
               >
                 서명 열만
@@ -232,16 +232,16 @@ export default function SignatureWorkspace(props: SignatureWorkspaceProps) {
                 type="button"
                 onClick={() => onPlacementModeChange('placeholderCells')}
                 disabled={processing}
-                className={`py-1.5 px-1.5 rounded-lg font-medium transition-all ${
+                className={`py-1.5 px-1.5 rounded-lg font-semibold transition-all ${
                   placementMode === 'placeholderCells'
-                    ? 'bg-indigo-600 text-white font-semibold shadow-sm'
-                    : 'bg-white border border-indigo-200 text-slate-700 hover:bg-indigo-50'
+                    ? 'bg-white text-slate-950 shadow-sm ring-1 ring-slate-900/5'
+                    : 'text-slate-500 hover:text-slate-800'
                 }`}
               >
                 1 표시만
               </button>
             </div>
-            <p className="text-[11px] text-indigo-900/75 leading-snug">
+            <p className="text-[11px] text-slate-500 leading-snug">
               {placementMode === 'auto'
                 ? detectedSignatureColLabel
                   ? `품목 칸 1번 + [${detectedSignatureColLabel}] 열 1번, 총 2번 자동 연동됩니다.`
@@ -359,7 +359,7 @@ export default function SignatureWorkspace(props: SignatureWorkspaceProps) {
                 value={Math.round(signatureScalePreset * 100)}
                 onChange={(e) => onSignatureScalePresetChange(Number(e.target.value) / 100)}
                 disabled={processing}
-                className="w-full accent-indigo-600"
+                className="studio-slider"
               />
             </div>
 
@@ -375,7 +375,7 @@ export default function SignatureWorkspace(props: SignatureWorkspaceProps) {
                 value={variationStrength}
                 onChange={(e) => onVariationStrengthChange(Number(e.target.value))}
                 disabled={processing}
-                className="w-full accent-indigo-600"
+                className="studio-slider"
               />
             </div>
           </div>
@@ -486,9 +486,9 @@ export default function SignatureWorkspace(props: SignatureWorkspaceProps) {
       </aside>
 
       {/* RIGHT LIVE PREVIEW STUDIO */}
-      <section className="bg-white rounded-2xl shadow-sm border border-slate-200/90 overflow-hidden flex flex-col">
+      <section className="ceramic-card rounded-3xl overflow-hidden flex flex-col">
         {/* Top Studio Toolbar: Title + Search + Filter + Zoom + Undo/Redo + Multi-Sheet */}
-        <div className="px-4 py-3 border-b border-slate-200 bg-slate-50/80 flex flex-wrap items-center justify-between gap-2.5">
+        <div className="px-5 py-3 border-b border-slate-200/80 bg-white/80 flex flex-wrap items-center justify-between gap-2.5">
           <div className="flex items-center gap-2 flex-wrap">
             <h3 className="text-sm font-bold text-slate-900">Live Preview</h3>
             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 text-[11px] font-medium border border-indigo-200/70">
@@ -656,9 +656,9 @@ export default function SignatureWorkspace(props: SignatureWorkspaceProps) {
         )}
 
         {/* Zoomable Live Preview Table Canvas */}
-        <div className="flex-1 overflow-auto p-4 bg-slate-100/80">
+        <div className="flex-1 overflow-auto p-5 studio-dot-grid">
           <div
-            className="inline-block min-w-full bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden origin-top-left transition-transform"
+            className="inline-block min-w-full bg-white rounded-2xl border border-slate-200/90 shadow-lg shadow-slate-900/5 overflow-hidden origin-top-left transition-transform"
             style={zoomPercent !== 100 ? { zoom: `${zoomPercent}%` } : undefined}
           >
             {previewLoading && (

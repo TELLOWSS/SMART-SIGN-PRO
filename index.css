@@ -1,4 +1,4 @@
-/* 기본 전역 스타일 */
+/* SMART SIGN PRO — 2026 Flagship Studio Design System */
 * {
   box-sizing: border-box;
 }
@@ -10,9 +10,12 @@ html, body, #root {
 }
 
 body {
-  font-family: 'Inter', sans-serif;
-  background-color: #f3f4f6;
-  color: #111827;
+  font-family: 'Pretendard Variable', Pretendard, 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  background-color: #f8fafc;
+  color: #0f172a;
+  font-feature-settings: "tnum" on, "lnum" on;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 button, input, textarea, select {
@@ -24,20 +27,109 @@ img {
   display: block;
 }
 
-.custom-scrollbar::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+/* Ambient Studio Mesh Background */
+.studio-mesh-bg {
+  background-color: #f8fafc;
+  background-image:
+    radial-gradient(at 14% 0%, rgba(79, 70, 229, 0.08) 0px, transparent 48%),
+    radial-gradient(at 88% 8%, rgba(37, 99, 235, 0.06) 0px, transparent 44%),
+    radial-gradient(at 50% 100%, rgba(15, 23, 42, 0.03) 0px, transparent 50%);
 }
 
-.custom-scrollbar::-webkit-scrollbar-track {
-  background: #f1f1f1;
+/* Figma / Linear Style Architectural Dot Grid for Preview Canvas */
+.studio-dot-grid {
+  background-color: #f1f5f9;
+  background-image: radial-gradient(rgba(15, 23, 42, 0.11) 1px, transparent 1px);
+  background-size: 18px 18px;
 }
 
-.custom-scrollbar::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
-  border-radius: 4px;
+/* Elevated Ceramic Surface */
+.ceramic-card {
+  background: rgba(255, 255, 255, 0.88);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  border: 1px solid rgba(15, 23, 42, 0.075);
+  box-shadow:
+    0 1px 2px rgba(15, 23, 42, 0.04),
+    0 14px 36px -12px rgba(15, 23, 42, 0.08);
 }
 
-.custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8;
+.ceramic-card:hover {
+  border-color: rgba(79, 70, 229, 0.22);
+  box-shadow:
+    0 2px 6px rgba(15, 23, 42, 0.05),
+    0 20px 44px -14px rgba(79, 70, 229, 0.12);
+}
+
+/* Sleek Custom Range Slider */
+input[type="range"].studio-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 5px;
+  border-radius: 9999px;
+  background: #e2e8f0;
+  outline: none;
+  cursor: pointer;
+}
+
+input[type="range"].studio-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 15px;
+  height: 15px;
+  border-radius: 9999px;
+  background: #0f172a;
+  border: 2.5px solid #ffffff;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.3);
+  transition: transform 0.15s ease, background-color 0.15s ease;
+}
+
+input[type="range"].studio-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.15);
+  background: #4f46e5;
+}
+
+input[type="range"].studio-slider::-moz-range-thumb {
+  width: 15px;
+  height: 15px;
+  border-radius: 9999px;
+  background: #0f172a;
+  border: 2.5px solid #ffffff;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.3);
+}
+
+/* Smooth Entrance Animations */
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-up {
+  animation: fadeUp 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Refined Thin Scrollbars */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.45);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.7);
 }
