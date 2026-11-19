@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   Download,
   FileSpreadsheet,
@@ -18,6 +18,13 @@ import {
   Check,
   Trash2,
   MousePointerClick,
+  Search,
+  ZoomIn,
+  ZoomOut,
+  Undo2,
+  Redo2,
+  Filter,
+  X,
 } from 'lucide-react';
 import { SheetPreviewModel } from '../services/alternativeExportService';
 import { SignaturePlacementMode } from '../types';
@@ -49,6 +56,10 @@ interface SignatureWorkspaceProps {
   unmatchedWorkerCount: number;
   selectableColumns: { col: number; label: string; isSignatureCol: boolean; assignedCount: number }[];
   workerRowMap: Map<number, { workerName: string; nameCol: number }>;
+  canUndo: boolean;
+  canRedo: boolean;
+  onUndo: () => void;
+  onRedo: () => void;
   onToggleColumnSignatures: (col: number, label: string) => void;
   onToggleCellSignature: (row: number, col: number) => void;
   onClearAllAssignments: () => void;
@@ -73,9 +84,9 @@ interface SignatureWorkspaceProps {
 }
 
 /**
- * 프리미엄 SaaS 스타일 워크스페이스
- * - 좌측: 컨트롤 패널 (마스킹, 크기 프리셋, 미매칭 수동연결, 즉석 패드, 강도, 배치 수량, 액션)
- * - 우측: 다중 워크시트 탭 + 실시간 라이브 프리뷰(병합셀 + 서명 오버레이)
+ * SMART SIGN PRO v2.0 플래그십 워크스페이스
+ * - 좌측: 그룹화된 컨트롤 패널 + 하단 고정 Primary Export Dock
+ * - 우측: 다중 시트 탭 + 검색/미서명 필터/확대축소/Undo·Redo 툴바 + 품목 일괄 칩 바 + 클릭-서명 라이브 프리뷰
  */
 export default function SignatureWorkspace(props: SignatureWorkspaceProps) {
   const {
@@ -96,6 +107,10 @@ export default function SignatureWorkspace(props: SignatureWorkspaceProps) {
     unmatchedWorkerCount,
     selectableColumns,
     workerRowMap,
+    canUndo,
+    canRedo,
+    onUndo,
+    onRedo,
     onToggleColumnSignatures,
     onToggleCellSignature,
     onClearAllAssignments,
@@ -119,379 +134,482 @@ export default function SignatureWorkspace(props: SignatureWorkspaceProps) {
     rowCount,
   } = props;
 
+  const [previewSearch, setPreviewSearch] = useState('');
+  const [onlyUnsignedRows, setOnlyUnsignedRows] = useState(false);
+  const [zoomPercent, setZoomPercent] = useState(100);
+
+  const totalWorkersCount = workerRowMap.size;
+
+  // 라이브 프리뷰 행 필터링 (헤더 행은 항상 유지, 근로자 데이터 행만 검색/미서명 필터 적용)
+  const visibleRows = useMemo(() => {
+    if (!previewModel) return [];
+    const q = previewSearch.trim().toLowerCase();
+    if (!q && !onlyUnsignedRows) return previewModel.rows;
+
+    return previewModel.rows.filter((row) => {
+      const workerInfo = workerRowMap.get(row.row);
+      if (!workerInfo) return true; // 제목/헤더 행은 항상 유지
+
+      if (onlyUnsignedRows) {
+        const hasAnySig = row.cells.some(c => !!c.signature);
+        if (hasAnySig) return false;
+      }
+
+      if (q) {
+        const rowText = row.cells.map(c => c.text || '').join(' ').toLowerCase();
+        return rowText.includes(q);
+      }
+
+      return true;
+    });
+  }, [previewModel, previewSearch, onlyUnsignedRows, workerRowMap]);
+
+  const adjustZoom = (delta: number) => {
+    setZoomPercent(prev => Math.max(70, Math.min(130, prev + delta)));
+  };
+
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-[340px_1fr] gap-4 h-[calc(100vh-96px)] p-4 bg-slate-100">
-      <aside className="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 flex flex-col gap-4 overflow-y-auto">
-        <div>
-          <h2 className="text-lg font-semibold text-slate-900">Control Panel</h2>
-          <p className="text-xs text-slate-500 mt-0.5">서식 보존 및 실무 커스텀 옵션을 설정합니다.</p>
-        </div>
-
-        {/* 0. 서명 배치 위치 모드 (품목 수량 '1' 보호 vs 다중 셀 서명) */}
-        <div className="bg-indigo-50/70 border border-indigo-200 rounded-xl p-3.5 space-y-2.5">
-          <div className="flex items-center justify-between text-xs text-indigo-950">
-            <span className="flex items-center gap-1.5 font-semibold">
-              <Crosshair size={14} className="text-indigo-600" /> 서명 배치 위치
-            </span>
-            {detectedSignatureColLabel && (
-              <span className="px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 text-[10px] font-bold">
-                감지: [{detectedSignatureColLabel}] 열
-              </span>
-            )}
-          </div>
-
-          <div className="grid grid-cols-3 gap-1 text-[11px]">
-            <button
-              type="button"
-              onClick={() => onPlacementModeChange('auto')}
-              disabled={processing}
-              className={`py-1.5 px-1.5 rounded-lg font-medium transition-colors ${
-                placementMode === 'auto'
-                  ? 'bg-indigo-600 text-white font-semibold shadow-sm'
-                  : 'bg-white border border-indigo-200 text-slate-700 hover:bg-indigo-50'
-              }`}
-            >
-              품목+서명
-            </button>
-            <button
-              type="button"
-              onClick={() => onPlacementModeChange('signatureColumnOnly')}
-              disabled={processing}
-              className={`py-1.5 px-1.5 rounded-lg font-medium transition-colors ${
-                placementMode === 'signatureColumnOnly'
-                  ? 'bg-indigo-600 text-white font-semibold shadow-sm'
-                  : 'bg-white border border-indigo-200 text-slate-700 hover:bg-indigo-50'
-              }`}
-            >
-              서명 열만
-            </button>
-            <button
-              type="button"
-              onClick={() => onPlacementModeChange('placeholderCells')}
-              disabled={processing}
-              className={`py-1.5 px-1.5 rounded-lg font-medium transition-colors ${
-                placementMode === 'placeholderCells'
-                  ? 'bg-indigo-600 text-white font-semibold shadow-sm'
-                  : 'bg-white border border-indigo-200 text-slate-700 hover:bg-indigo-50'
-              }`}
-            >
-              1 표시만
-            </button>
-          </div>
-          <p className="text-[11px] text-indigo-900/75 leading-tight">
-            {placementMode === 'auto'
-              ? detectedSignatureColLabel
-                ? `품목 칸(1 표시·직접 클릭)에 1번 + [${detectedSignatureColLabel}] 열에 받았다고 1번, 2번 서명이 자동 연동됩니다.`
-                : "품목/서명 칸에 자연스럽게 서명을 배치합니다."
-              : placementMode === 'signatureColumnOnly'
-                ? "전용 '서명' 열에만 1번 서명을 배치합니다."
-                : "'1' 표시가 있는 셀에만 서명을 배치합니다."}
-          </p>
-        </div>
-
-        {/* 0-2. 서명 여백 자동 제거 및 잉크 선명도 보정 */}
-        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-1.5">
-          <div className="flex items-center justify-between">
-            <span className="flex items-center gap-1.5 text-xs font-semibold text-slate-800">
-              <Sparkles size={14} className="text-indigo-600" /> 서명 여백제거·진하게 보정
-            </span>
-            <label className="relative inline-flex items-center cursor-pointer">
-              <input
-                type="checkbox"
-                checked={enhanceSignatureInk}
-                onChange={(e) => onEnhanceSignatureInkChange(e.target.checked)}
-                disabled={processing}
-                className="sr-only peer"
-              />
-              <div className="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
-            </label>
-          </div>
-          <p className="text-[11px] text-slate-500 leading-tight">
-            스캔 여백을 자동 제거하고 흐릿한 필기선을 실제 볼펜처럼 진하게 보정합니다.
-          </p>
-        </div>
-
-        {/* 1. 개인정보 보호 (주민번호 마스킹) */}
-        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="flex items-center gap-1.5 text-xs font-semibold text-slate-800">
-              <ShieldCheck size={15} className="text-emerald-600" /> 주민번호 뒷자리 마스킹
-            </span>
-            <label className="relative inline-flex items-center cursor-pointer">
-              <input
-                type="checkbox"
-                checked={maskResidentNumber}
-                onChange={(e) => onMaskResidentNumberChange(e.target.checked)}
-                disabled={processing}
-                className="sr-only peer"
-              />
-              <div className="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-600"></div>
-            </label>
-          </div>
-          <p className="text-[11px] text-slate-500 leading-tight">
-            내국인(<span className="font-mono text-slate-700">670305-1******</span>) 및 외국인등록번호 뒷자리를 마스킹합니다.
-          </p>
-        </div>
-
-        {/* 2. 서명란 맞춤 크기 프리셋 */}
-        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2.5">
-          <div className="flex items-center justify-between text-xs text-slate-800">
-            <span className="flex items-center gap-1.5 font-semibold">
-              <Scaling size={14} className="text-indigo-600" /> 서명 크기 맞춤
-            </span>
-            <span className="text-indigo-700 font-bold">{Math.round(signatureScalePreset * 100)}%</span>
-          </div>
-
-          <div className="grid grid-cols-3 gap-1 text-[11px]">
-            <button
-              type="button"
-              onClick={() => onSignatureScalePresetChange(0.85)}
-              disabled={processing}
-              className={`py-1.5 px-2 rounded-lg font-medium transition-colors ${
-                Math.abs(signatureScalePreset - 0.85) < 0.02
-                  ? 'bg-indigo-600 text-white font-semibold shadow-sm'
-                  : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
-              }`}
-            >
-              컴팩트 85%
-            </button>
-            <button
-              type="button"
-              onClick={() => onSignatureScalePresetChange(1.0)}
-              disabled={processing}
-              className={`py-1.5 px-2 rounded-lg font-medium transition-colors ${
-                Math.abs(signatureScalePreset - 1.0) < 0.02
-                  ? 'bg-indigo-600 text-white font-semibold shadow-sm'
-                  : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
-              }`}
-            >
-              표준 100%
-            </button>
-            <button
-              type="button"
-              onClick={() => onSignatureScalePresetChange(1.15)}
-              disabled={processing}
-              className={`py-1.5 px-2 rounded-lg font-medium transition-colors ${
-                Math.abs(signatureScalePreset - 1.15) < 0.02
-                  ? 'bg-indigo-600 text-white font-semibold shadow-sm'
-                  : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
-              }`}
-            >
-              확대 115%
-            </button>
-          </div>
-
-          <input
-            type="range"
-            min={70}
-            max={130}
-            step={5}
-            value={Math.round(signatureScalePreset * 100)}
-            onChange={(e) => onSignatureScalePresetChange(Number(e.target.value) / 100)}
-            disabled={processing}
-            className="w-full accent-indigo-600"
-          />
-        </div>
-
-        {/* 3. 외국인 근로자 및 미매칭 관리 & 현장 즉석 서명 */}
-        <div className="grid grid-cols-2 gap-2">
-          <button
-            type="button"
-            onClick={onOpenManualMatch}
-            disabled={processing}
-            className="p-2.5 rounded-xl border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 text-indigo-900 text-xs font-semibold flex flex-col items-center justify-center gap-1 transition-colors text-center relative"
-          >
-            <Users size={16} className="text-indigo-600" />
-            <span>수동 서명 매칭</span>
-            {unmatchedWorkerCount > 0 && (
-              <span className="absolute -top-1.5 -right-1.5 px-1.5 py-0.5 rounded-full bg-amber-500 text-white text-[10px] font-bold shadow-sm flex items-center gap-0.5">
-                <AlertTriangle size={9} /> {unmatchedWorkerCount}
-              </span>
-            )}
-          </button>
-
-          <button
-            type="button"
-            onClick={onOpenSignaturePad}
-            disabled={processing}
-            className="p-2.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 text-xs font-semibold flex flex-col items-center justify-center gap-1 transition-colors text-center shadow-sm"
-          >
-            <PenTool size={16} className="text-indigo-600" />
-            <span>현장 즉석 서명</span>
-          </button>
-        </div>
-
-        {/* 4. 서명 변형 강도 */}
-        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2">
-          <div className="flex items-center justify-between text-xs text-slate-700">
-            <span className="flex items-center gap-1.5 font-medium"><SlidersHorizontal size={13} />서명 변형 강도</span>
-            <span className="text-indigo-700 font-semibold">{variationStrength}</span>
-          </div>
-          <input
-            type="range"
-            min={0}
-            max={100}
-            value={variationStrength}
-            onChange={(e) => onVariationStrengthChange(Number(e.target.value))}
-            disabled={processing}
-            className="w-full accent-indigo-600"
-          />
-          <p className="text-[11px] text-slate-500">회전, 크기, 위치의 자연스러운 편차 폭</p>
-        </div>
-
-        {/* 5. 일괄 생성 개수 */}
-        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2">
-          <label className="text-xs font-medium text-slate-700 block">일괄 생성 파일 개수 (N)</label>
-          <input
-            type="number"
-            min={1}
-            max={50}
-            value={batchCount}
-            onChange={(e) => onBatchCountChange(Number(e.target.value || 1))}
-            disabled={processing}
-            className="w-full rounded-lg border border-slate-300 px-3 py-1.5 text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          />
-        </div>
-
-        {/* 6. 출력 포맷 */}
-        <div className="flex flex-wrap gap-1.5">
-          <button
-            onClick={() => onExportFormatChange('excel')}
-            className={`flex-1 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center justify-center gap-1 ${
-              exportFormat === 'excel' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700'
-            }`}
-          >
-            <FileSpreadsheet size={13} /> Excel
-          </button>
-          <button
-            onClick={() => onExportFormatChange('pdf')}
-            className={`flex-1 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center justify-center gap-1 ${
-              exportFormat === 'pdf' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700'
-            }`}
-          >
-            <FileText size={13} /> PDF
-          </button>
-          <button
-            onClick={() => onExportFormatChange('png')}
-            className={`flex-1 px-3 py-1.5 rounded-lg text-xs font-medium flex items-center justify-center gap-1 ${
-              exportFormat === 'png' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-700'
-            }`}
-          >
-            <ImageIcon size={13} /> PNG
-          </button>
-        </div>
-
-        {/* 7. 주요 액션 버튼 */}
-        <div className="grid grid-cols-2 gap-2">
-          <button
-            onClick={onAutoMatch}
-            disabled={processing}
-            className="px-3 py-2 rounded-xl bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 disabled:opacity-50 flex items-center justify-center gap-1.5 transition-colors"
-          >
-            <RefreshCw size={13} /> 재매칭
-          </button>
-          <button
-            onClick={onSingleExport}
-            disabled={processing}
-            className="px-3 py-2 rounded-xl bg-emerald-600 text-white text-xs font-semibold hover:bg-emerald-700 disabled:opacity-50 flex items-center justify-center gap-1.5 shadow-sm transition-colors"
-          >
-            <Download size={13} /> 단일 저장
-          </button>
-        </div>
-
-        <button
-          onClick={onBatchZipExport}
-          disabled={processing || batchCount < 1}
-          className="w-full px-4 py-2.5 rounded-xl bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-700 disabled:opacity-50 flex items-center justify-center gap-2 shadow-sm transition-colors"
-        >
-          <PackageOpen size={15} /> 일괄 생성 및 ZIP 다운로드
-        </button>
-
-        <button
-          onClick={onStartOver}
-          className="w-full px-4 py-2 rounded-xl border border-slate-300 text-slate-700 bg-white hover:bg-slate-50 text-xs font-medium flex items-center justify-center gap-1.5 transition-colors"
-        >
-          <RefreshCw size={13} /> 처음으로 돌아가기
-        </button>
-
-        {isBatchCancelable && (
-          <button
-            onClick={onCancelBatchExport}
-            className="w-full px-4 py-2 rounded-xl bg-rose-50 text-rose-700 border border-rose-200 text-xs font-semibold hover:bg-rose-100 flex items-center justify-center gap-1.5"
-          >
-            작업 취소
-          </button>
-        )}
-
-        {batchProgress && (
-          <div className="bg-indigo-50 border border-indigo-100 rounded-xl p-3">
-            <div className="flex items-center justify-between text-xs text-indigo-900 mb-1.5">
-              <span>
-                {batchProgress.phase === 'zip' ? 'ZIP 압축 중' : '파일 생성 중'}
-                {batchProgress.mode === 'high-volume' ? ' · 고용량 모드' : ''}
-              </span>
-              <span className="font-semibold">{Math.round(batchProgress.percent)}%</span>
+    <div className="grid grid-cols-1 xl:grid-cols-[356px_1fr] gap-4 h-[calc(100vh-72px)] p-4 bg-slate-100/90">
+      {/* LEFT CONTROL PANEL */}
+      <aside className="bg-white rounded-2xl shadow-sm border border-slate-200/90 flex flex-col overflow-hidden">
+        {/* Scrollable Settings Area */}
+        <div className="p-4 flex-1 overflow-y-auto space-y-3.5">
+          {/* Quick Summary KPI Strip */}
+          <div className="grid grid-cols-3 gap-2">
+            <div className="bg-slate-50 border border-slate-200/80 rounded-xl px-2.5 py-2 text-center">
+              <div className="text-[10px] font-medium text-slate-500">근로자</div>
+              <div className="text-sm font-bold text-slate-900">{totalWorkersCount}명</div>
             </div>
-            <div className="w-full h-2 rounded-full bg-indigo-100 overflow-hidden">
-              <div className="h-full bg-indigo-600 transition-all" style={{ width: `${batchProgress.percent}%` }} />
+            <div className="bg-indigo-50/70 border border-indigo-200/70 rounded-xl px-2.5 py-2 text-center">
+              <div className="text-[10px] font-medium text-indigo-700">배치 서명</div>
+              <div className="text-sm font-bold text-indigo-700">{assignmentCount}건</div>
             </div>
-            <p className="text-[11px] text-indigo-800 mt-1.5">
-              {batchProgress.message || (batchProgress.phase === 'zip'
-                ? `압축 진행 중... (${batchProgress.current}/${batchProgress.total})`
-                : `${batchProgress.current}/${batchProgress.total} 파일 생성 완료`)}
-            </p>
+            <div className={`border rounded-xl px-2.5 py-2 text-center ${unmatchedWorkerCount > 0 ? 'bg-amber-50 border-amber-200' : 'bg-emerald-50 border-emerald-200'}`}>
+              <div className={`text-[10px] font-medium ${unmatchedWorkerCount > 0 ? 'text-amber-700' : 'text-emerald-700'}`}>미서명</div>
+              <div className={`text-sm font-bold ${unmatchedWorkerCount > 0 ? 'text-amber-700' : 'text-emerald-700'}`}>{unmatchedWorkerCount}명</div>
+            </div>
           </div>
-        )}
 
-        <div className="mt-auto bg-slate-50 rounded-xl border border-slate-200 p-2.5 text-[11px] text-slate-600 space-y-0.5">
-          <p>배치된 서명: <span className="font-semibold text-slate-800">{assignmentCount}개</span></p>
-          <p>프리뷰 행 수: <span className="font-semibold text-slate-800">{rowCount}행</span></p>
-        </div>
-      </aside>
-
-      <section className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden flex flex-col">
-        {/* Header with multi-sheet tabs */}
-        <div className="px-5 py-3 border-b border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h3 className="text-sm font-semibold text-slate-800 flex items-center gap-2">
-              Live Preview
-              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 text-[11px] font-medium border border-indigo-100">
-                <MousePointerClick size={11} /> 칸 직접 클릭으로 자유 서명 지정
+          {/* 1. 서명 배치 위치 모드 */}
+          <div className="bg-indigo-50/60 border border-indigo-200/80 rounded-xl p-3 space-y-2">
+            <div className="flex items-center justify-between text-xs text-indigo-950">
+              <span className="flex items-center gap-1.5 font-semibold">
+                <Crosshair size={14} className="text-indigo-600" /> 서명 배치 모드
               </span>
-            </h3>
-            <p className="text-xs text-slate-500 mt-0.5">
-              엑셀에 '1'을 적지 않아도, 아래 품목 버튼이나 표의 원하는 근로자·품목 칸을 클릭하면 서명이 즉시 추가/해제됩니다.
+              {detectedSignatureColLabel && (
+                <span className="px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 text-[10px] font-bold">
+                  [{detectedSignatureColLabel}] 열 감지
+                </span>
+              )}
+            </div>
+
+            <div className="grid grid-cols-3 gap-1 text-[11px]">
+              <button
+                type="button"
+                onClick={() => onPlacementModeChange('auto')}
+                disabled={processing}
+                className={`py-1.5 px-1.5 rounded-lg font-medium transition-all ${
+                  placementMode === 'auto'
+                    ? 'bg-indigo-600 text-white font-semibold shadow-sm'
+                    : 'bg-white border border-indigo-200 text-slate-700 hover:bg-indigo-50'
+                }`}
+              >
+                품목+서명
+              </button>
+              <button
+                type="button"
+                onClick={() => onPlacementModeChange('signatureColumnOnly')}
+                disabled={processing}
+                className={`py-1.5 px-1.5 rounded-lg font-medium transition-all ${
+                  placementMode === 'signatureColumnOnly'
+                    ? 'bg-indigo-600 text-white font-semibold shadow-sm'
+                    : 'bg-white border border-indigo-200 text-slate-700 hover:bg-indigo-50'
+                }`}
+              >
+                서명 열만
+              </button>
+              <button
+                type="button"
+                onClick={() => onPlacementModeChange('placeholderCells')}
+                disabled={processing}
+                className={`py-1.5 px-1.5 rounded-lg font-medium transition-all ${
+                  placementMode === 'placeholderCells'
+                    ? 'bg-indigo-600 text-white font-semibold shadow-sm'
+                    : 'bg-white border border-indigo-200 text-slate-700 hover:bg-indigo-50'
+                }`}
+              >
+                1 표시만
+              </button>
+            </div>
+            <p className="text-[11px] text-indigo-900/75 leading-snug">
+              {placementMode === 'auto'
+                ? detectedSignatureColLabel
+                  ? `품목 칸 1번 + [${detectedSignatureColLabel}] 열 1번, 총 2번 자동 연동됩니다.`
+                  : "품목/서명 칸에 자연스럽게 서명을 배치합니다."
+                : placementMode === 'signatureColumnOnly'
+                  ? "전용 '서명' 열에만 1번 서명을 배치합니다."
+                  : "'1' 표시가 있는 셀에만 서명을 배치합니다."}
             </p>
           </div>
 
-          {/* 다중 워크시트(월별/공종별 탭) 선택 */}
-          {availableSheets && availableSheets.length > 1 && (
-            <div className="flex items-center gap-1.5 overflow-x-auto max-w-xl pb-0.5">
-              <span className="text-xs font-semibold text-slate-500 flex items-center gap-1 mr-1">
-                <Layers size={13} /> 시트:
-              </span>
-              {availableSheets.map((sheetName, idx) => (
-                <button
-                  key={`sheet-tab-${idx}-${sheetName}`}
-                  type="button"
-                  onClick={() => onSelectSheet(idx)}
+          {/* 2. 수동 매칭 & 현장 즉석 서명 */}
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={onOpenManualMatch}
+              disabled={processing}
+              className="p-2.5 rounded-xl border border-indigo-200 bg-white hover:bg-indigo-50 text-indigo-900 text-xs font-semibold flex flex-col items-center justify-center gap-1 transition-all shadow-sm relative"
+            >
+              <Users size={16} className="text-indigo-600" />
+              <span>수동 서명 매칭</span>
+              {unmatchedWorkerCount > 0 && (
+                <span className="absolute -top-1.5 -right-1.5 px-1.5 py-0.5 rounded-full bg-amber-500 text-white text-[10px] font-bold shadow-sm flex items-center gap-0.5">
+                  <AlertTriangle size={9} /> {unmatchedWorkerCount}
+                </span>
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={onOpenSignaturePad}
+              disabled={processing}
+              className="p-2.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 text-xs font-semibold flex flex-col items-center justify-center gap-1 transition-all shadow-sm"
+            >
+              <PenTool size={16} className="text-indigo-600" />
+              <span>현장 즉석 서명</span>
+            </button>
+          </div>
+
+          {/* 3. 품질 & 보안 토글 그룹 */}
+          <div className="bg-slate-50 border border-slate-200/90 rounded-xl p-3 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-800">
+                  <Sparkles size={14} className="text-indigo-600" /> 여백제거·진하게 보정
+                </div>
+                <p className="text-[10px] text-slate-500 mt-0.5">빈 여백 자동 크롭 및 볼펜 선명도 보강</p>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer flex-shrink-0">
+                <input
+                  type="checkbox"
+                  checked={enhanceSignatureInk}
+                  onChange={(e) => onEnhanceSignatureInkChange(e.target.checked)}
                   disabled={processing}
-                  className={`px-3 py-1 rounded-lg text-xs font-medium whitespace-nowrap transition-colors ${
-                    activeSheetIndex === idx
-                      ? 'bg-indigo-600 text-white font-semibold shadow-sm'
-                      : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
-                  }`}
-                >
-                  {sheetName}
-                </button>
-              ))}
+                  className="sr-only peer"
+                />
+                <div className="w-9 h-5 bg-slate-200 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
+              </label>
+            </div>
+
+            <div className="border-t border-slate-200/80 pt-2.5 flex items-center justify-between gap-2">
+              <div>
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-800">
+                  <ShieldCheck size={14} className="text-emerald-600" /> 주민번호 뒷자리 마스킹
+                </div>
+                <p className="text-[10px] text-slate-500 mt-0.5">내국인·외국인번호 개인정보 보호</p>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer flex-shrink-0">
+                <input
+                  type="checkbox"
+                  checked={maskResidentNumber}
+                  onChange={(e) => onMaskResidentNumberChange(e.target.checked)}
+                  disabled={processing}
+                  className="sr-only peer"
+                />
+                <div className="w-9 h-5 bg-slate-200 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-emerald-600"></div>
+              </label>
+            </div>
+          </div>
+
+          {/* 4. 서명 크기 & 변형 강도 */}
+          <div className="bg-slate-50 border border-slate-200/90 rounded-xl p-3 space-y-3">
+            <div className="space-y-2">
+              <div className="flex items-center justify-between text-xs text-slate-800">
+                <span className="flex items-center gap-1.5 font-semibold">
+                  <Scaling size={14} className="text-indigo-600" /> 서명 크기 맞춤
+                </span>
+                <span className="text-indigo-700 font-bold">{Math.round(signatureScalePreset * 100)}%</span>
+              </div>
+              <div className="grid grid-cols-3 gap-1 text-[11px]">
+                {[
+                  { label: '컴팩트 85%', val: 0.85 },
+                  { label: '표준 100%', val: 1.0 },
+                  { label: '확대 115%', val: 1.15 },
+                ].map(p => (
+                  <button
+                    key={p.label}
+                    type="button"
+                    onClick={() => onSignatureScalePresetChange(p.val)}
+                    disabled={processing}
+                    className={`py-1 px-1.5 rounded-lg font-medium transition-colors ${
+                      Math.abs(signatureScalePreset - p.val) < 0.02
+                        ? 'bg-indigo-600 text-white font-semibold shadow-sm'
+                        : 'bg-white border border-slate-200 text-slate-700 hover:bg-slate-100'
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                ))}
+              </div>
+              <input
+                type="range"
+                min={70}
+                max={130}
+                step={5}
+                value={Math.round(signatureScalePreset * 100)}
+                onChange={(e) => onSignatureScalePresetChange(Number(e.target.value) / 100)}
+                disabled={processing}
+                className="w-full accent-indigo-600"
+              />
+            </div>
+
+            <div className="border-t border-slate-200/80 pt-2.5 space-y-1.5">
+              <div className="flex items-center justify-between text-xs text-slate-700">
+                <span className="flex items-center gap-1.5 font-medium"><SlidersHorizontal size={13} />필기 자연스러움 강도</span>
+                <span className="text-indigo-700 font-semibold">{variationStrength}</span>
+              </div>
+              <input
+                type="range"
+                min={0}
+                max={100}
+                value={variationStrength}
+                onChange={(e) => onVariationStrengthChange(Number(e.target.value))}
+                disabled={processing}
+                className="w-full accent-indigo-600"
+              />
+            </div>
+          </div>
+
+          {/* 5. 출력 포맷 & 일괄 수량 */}
+          <div className="bg-slate-50 border border-slate-200/90 rounded-xl p-3 space-y-2.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-semibold text-slate-700">출력 형식</span>
+              <div className="flex gap-1">
+                {(['excel', 'pdf', 'png'] as const).map(fmt => (
+                  <button
+                    key={fmt}
+                    type="button"
+                    onClick={() => onExportFormatChange(fmt)}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1 transition-colors ${
+                      exportFormat === fmt ? 'bg-indigo-600 text-white shadow-sm' : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    {fmt === 'excel' && <FileSpreadsheet size={12} />}
+                    {fmt === 'pdf' && <FileText size={12} />}
+                    {fmt === 'png' && <ImageIcon size={12} />}
+                    {fmt.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-2 pt-1 border-t border-slate-200/70">
+              <label className="text-xs font-medium text-slate-700">ZIP 일괄 생성 (부)</label>
+              <input
+                type="number"
+                min={1}
+                max={50}
+                value={batchCount}
+                onChange={(e) => onBatchCountChange(Number(e.target.value || 1))}
+                disabled={processing}
+                className="w-20 rounded-lg border border-slate-300 bg-white px-2.5 py-1 text-xs font-semibold text-center focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+          </div>
+
+          {batchProgress && (
+            <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-3">
+              <div className="flex items-center justify-between text-xs text-indigo-900 mb-1.5">
+                <span className="font-semibold">
+                  {batchProgress.phase === 'zip' ? 'ZIP 압축 중' : '파일 생성 중'}
+                </span>
+                <span className="font-bold">{Math.round(batchProgress.percent)}%</span>
+              </div>
+              <div className="w-full h-2 rounded-full bg-indigo-100 overflow-hidden">
+                <div className="h-full bg-indigo-600 transition-all" style={{ width: `${batchProgress.percent}%` }} />
+              </div>
+              <p className="text-[11px] text-indigo-800 mt-1.5">
+                {batchProgress.message || `${batchProgress.current}/${batchProgress.total} 완료`}
+              </p>
             </div>
           )}
         </div>
 
-        {/* 원하는 품목/서명 열 일괄 지정 칩 바 ('1' 없이 1클릭 전체 지정/해제) */}
+        {/* Sticky Bottom Primary Export Dock */}
+        <div className="p-3.5 border-t border-slate-200 bg-slate-50/90 space-y-2">
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={onAutoMatch}
+              disabled={processing}
+              className="px-3 py-2.5 rounded-xl bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800 disabled:opacity-50 flex items-center justify-center gap-1.5 transition-colors"
+            >
+              <RefreshCw size={13} /> 랜덤 재매칭
+            </button>
+            <button
+              type="button"
+              onClick={onSingleExport}
+              disabled={processing || assignmentCount === 0}
+              className="px-3 py-2.5 rounded-xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 disabled:opacity-50 flex items-center justify-center gap-1.5 shadow-sm transition-colors"
+            >
+              <Download size={14} /> 단일 저장
+            </button>
+          </div>
+
+          <button
+            type="button"
+            onClick={onBatchZipExport}
+            disabled={processing || batchCount < 1 || assignmentCount === 0}
+            className="w-full px-4 py-2.5 rounded-xl bg-indigo-600 text-white text-xs font-bold hover:bg-indigo-700 disabled:opacity-50 flex items-center justify-center gap-2 shadow-sm transition-colors"
+          >
+            <PackageOpen size={15} /> {batchCount}부 일괄 생성 · ZIP 다운로드
+          </button>
+
+          {isBatchCancelable ? (
+            <button
+              type="button"
+              onClick={onCancelBatchExport}
+              className="w-full px-3 py-2 rounded-xl bg-rose-50 text-rose-700 border border-rose-200 text-xs font-semibold hover:bg-rose-100"
+            >
+              작업 취소
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={onStartOver}
+              className="w-full px-3 py-1.5 rounded-lg text-slate-500 hover:text-slate-800 hover:bg-slate-200/60 text-[11px] font-medium flex items-center justify-center gap-1 transition-colors"
+            >
+              <RefreshCw size={12} /> 다른 파일로 새로 시작 ({rowCount}행)
+            </button>
+          )}
+        </div>
+      </aside>
+
+      {/* RIGHT LIVE PREVIEW STUDIO */}
+      <section className="bg-white rounded-2xl shadow-sm border border-slate-200/90 overflow-hidden flex flex-col">
+        {/* Top Studio Toolbar: Title + Search + Filter + Zoom + Undo/Redo + Multi-Sheet */}
+        <div className="px-4 py-3 border-b border-slate-200 bg-slate-50/80 flex flex-wrap items-center justify-between gap-2.5">
+          <div className="flex items-center gap-2 flex-wrap">
+            <h3 className="text-sm font-bold text-slate-900">Live Preview</h3>
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 text-[11px] font-medium border border-indigo-200/70">
+              <MousePointerClick size={11} /> 칸 클릭으로 자유 지정
+            </span>
+
+            {/* 다중 워크시트 탭 */}
+            {availableSheets && availableSheets.length > 1 && (
+              <div className="flex items-center gap-1 ml-1 pl-2 border-l border-slate-300 overflow-x-auto max-w-md">
+                <Layers size={13} className="text-slate-400 flex-shrink-0" />
+                {availableSheets.map((sheetName, idx) => (
+                  <button
+                    key={`sheet-tab-${idx}-${sheetName}`}
+                    type="button"
+                    onClick={() => onSelectSheet(idx)}
+                    disabled={processing}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-medium whitespace-nowrap transition-colors ${
+                      activeSheetIndex === idx
+                        ? 'bg-indigo-600 text-white font-semibold shadow-sm'
+                        : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    {sheetName}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Search, Unsigned Filter, Zoom, Undo/Redo */}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {/* 근로자 빠른 검색 */}
+            <div className="relative">
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+              <input
+                type="text"
+                value={previewSearch}
+                onChange={(e) => setPreviewSearch(e.target.value)}
+                placeholder="이름·직종 검색..."
+                className="pl-7 pr-6 py-1 rounded-lg border border-slate-200 bg-white text-xs focus:outline-none focus:ring-2 focus:ring-indigo-500 w-36"
+              />
+              {previewSearch && (
+                <button
+                  type="button"
+                  onClick={() => setPreviewSearch('')}
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                >
+                  <X size={12} />
+                </button>
+              )}
+            </div>
+
+            {/* 미서명 행만 필터 */}
+            <button
+              type="button"
+              onClick={() => setOnlyUnsignedRows(v => !v)}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1 border transition-colors ${
+                onlyUnsignedRows
+                  ? 'bg-amber-500 text-white border-amber-500 shadow-sm'
+                  : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+              }`}
+              title="서명이 아직 없는 근로자 행만 모아보기"
+            >
+              <Filter size={11} /> 미서명만
+            </button>
+
+            {/* 확대 / 축소 */}
+            <div className="inline-flex items-center bg-white border border-slate-200 rounded-lg overflow-hidden">
+              <button
+                type="button"
+                onClick={() => adjustZoom(-10)}
+                className="px-1.5 py-1 text-slate-600 hover:bg-slate-100"
+                title="축소"
+              >
+                <ZoomOut size={13} />
+              </button>
+              <button
+                type="button"
+                onClick={() => setZoomPercent(100)}
+                className="px-1.5 py-1 text-[11px] font-semibold text-slate-700 hover:bg-slate-100 min-w-[40px] text-center"
+                title="100% 초기화"
+              >
+                {zoomPercent}%
+              </button>
+              <button
+                type="button"
+                onClick={() => adjustZoom(10)}
+                className="px-1.5 py-1 text-slate-600 hover:bg-slate-100"
+                title="확대"
+              >
+                <ZoomIn size={13} />
+              </button>
+            </div>
+
+            {/* Undo / Redo */}
+            <div className="inline-flex items-center bg-white border border-slate-200 rounded-lg overflow-hidden">
+              <button
+                type="button"
+                onClick={onUndo}
+                disabled={!canUndo || processing}
+                className="px-2 py-1 text-slate-600 hover:bg-slate-100 disabled:opacity-35"
+                title="실행 취소 (Ctrl+Z)"
+              >
+                <Undo2 size={13} />
+              </button>
+              <button
+                type="button"
+                onClick={onRedo}
+                disabled={!canRedo || processing}
+                className="px-2 py-1 text-slate-600 hover:bg-slate-100 disabled:opacity-35 border-l border-slate-200"
+                title="다시 실행 (Ctrl+Y)"
+              >
+                <Redo2 size={13} />
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* 원하는 품목/서명 열 일괄 지정 칩 바 */}
         {selectableColumns && selectableColumns.length > 0 && (
-          <div className="px-5 py-2.5 border-b border-slate-200 bg-white flex flex-wrap items-center gap-1.5">
+          <div className="px-4 py-2 border-b border-slate-200 bg-white flex flex-wrap items-center gap-1.5">
             <span className="text-[11px] font-bold text-slate-600 mr-1 whitespace-nowrap">
               품목 일괄 지정:
             </span>
@@ -537,77 +655,84 @@ export default function SignatureWorkspace(props: SignatureWorkspaceProps) {
           </div>
         )}
 
-        <div className="flex-1 overflow-auto p-4 bg-slate-100">
-          <div className="inline-block min-w-full bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
+        {/* Zoomable Live Preview Table Canvas */}
+        <div className="flex-1 overflow-auto p-4 bg-slate-100/80">
+          <div
+            className="inline-block min-w-full bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden origin-top-left transition-transform"
+            style={zoomPercent !== 100 ? { zoom: `${zoomPercent}%` } : undefined}
+          >
             {previewLoading && (
-              <div className="p-10 text-center text-slate-500 text-sm">미리보기 렌더링 중입니다...</div>
+              <div className="p-12 text-center text-slate-500 text-sm flex flex-col items-center gap-2">
+                <RefreshCw size={22} className="animate-spin text-indigo-500" />
+                <span>미리보기 렌더링 중입니다...</span>
+              </div>
             )}
 
             {!previewLoading && previewModel && (
               <table className="border-collapse w-full table-auto">
                 <tbody>
-                  {previewModel.rows.map((row) => {
+                  {visibleRows.map((row) => {
                     const workerInfo = workerRowMap.get(row.row);
                     return (
-                    <tr key={`preview-row-${row.row}`} className="border-b border-slate-200 hover:bg-slate-50/40">
-                      {row.cells.map((cell) => {
-                        if (cell.hidden) return null;
+                      <tr key={`preview-row-${row.row}`} className="border-b border-slate-200 hover:bg-slate-50/50">
+                        {row.cells.map((cell) => {
+                          if (cell.hidden) return null;
 
-                        const isInteractiveCell = !!workerInfo && cell.col !== workerInfo.nameCol;
-                        const colLabel = selectableColumns.find(c => c.col === cell.col)?.label;
+                          const isInteractiveCell = !!workerInfo && cell.col !== workerInfo.nameCol;
+                          const colLabel = selectableColumns.find(c => c.col === cell.col)?.label;
 
-                        return (
-                          <td
-                            key={cell.key}
-                            rowSpan={cell.rowSpan}
-                            colSpan={cell.colSpan}
-                            onClick={isInteractiveCell && !processing ? () => onToggleCellSignature(cell.row, cell.col) : undefined}
-                            title={
-                              isInteractiveCell
-                                ? `${workerInfo.workerName}${colLabel ? ` · [${colLabel}]` : ''} — 클릭하여 서명 ${cell.signature ? '해제' : '추가'}`
-                                : undefined
-                            }
-                            className={`border-r border-slate-200 px-2 py-1 text-xs sm:text-sm relative min-w-[64px] select-none ${
-                              isInteractiveCell
-                                ? cell.signature
-                                  ? 'cursor-pointer bg-indigo-50/40 hover:bg-rose-50/60 hover:ring-1 hover:ring-inset hover:ring-rose-300 transition-colors'
-                                  : 'cursor-pointer hover:bg-indigo-50/70 hover:ring-1 hover:ring-inset hover:ring-indigo-300 transition-colors'
-                                : ''
-                            }`}
-                            style={{
-                              fontFamily: cell.style.fontFamily,
-                              fontSize: cell.style.fontSize,
-                              fontWeight: cell.style.fontWeight,
-                              fontStyle: cell.style.fontStyle,
-                              textAlign: cell.style.textAlign,
-                              verticalAlign: cell.style.verticalAlign,
-                            }}
-                          >
-                            <div className="relative w-full h-full min-h-[34px] flex items-center justify-center">
-                              <span className="z-0 text-slate-700 whitespace-pre-wrap break-words">{cell.text}</span>
+                          return (
+                            <td
+                              key={cell.key}
+                              rowSpan={cell.rowSpan}
+                              colSpan={cell.colSpan}
+                              onClick={isInteractiveCell && !processing ? () => onToggleCellSignature(cell.row, cell.col) : undefined}
+                              title={
+                                isInteractiveCell
+                                  ? `${workerInfo.workerName}${colLabel ? ` · [${colLabel}]` : ''} — 클릭하여 서명 ${cell.signature ? '해제' : '추가'}`
+                                  : undefined
+                              }
+                              className={`border-r border-slate-200 px-2 py-1 text-xs sm:text-sm relative min-w-[64px] select-none ${
+                                isInteractiveCell
+                                  ? cell.signature
+                                    ? 'cursor-pointer bg-indigo-50/35 hover:bg-rose-50/60 hover:ring-1 hover:ring-inset hover:ring-rose-300 transition-colors'
+                                    : 'cursor-pointer hover:bg-indigo-50/70 hover:ring-1 hover:ring-inset hover:ring-indigo-300 transition-colors'
+                                  : ''
+                              }`}
+                              style={{
+                                fontFamily: cell.style.fontFamily,
+                                fontSize: cell.style.fontSize,
+                                fontWeight: cell.style.fontWeight,
+                                fontStyle: cell.style.fontStyle,
+                                textAlign: cell.style.textAlign,
+                                verticalAlign: cell.style.verticalAlign,
+                              }}
+                            >
+                              <div className="relative w-full h-full min-h-[34px] flex items-center justify-center">
+                                <span className="z-0 text-slate-700 whitespace-pre-wrap break-words">{cell.text}</span>
 
-                              {cell.signature && (
-                                <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
-                                  <img
-                                    src={cell.signature.src}
-                                    alt="signature-preview"
-                                    className="drop-shadow-sm mix-blend-multiply"
-                                    style={{
-                                      transform: cell.signature.transform,
-                                      opacity: enhanceSignatureInk ? 0.95 : cell.signature.opacity,
-                                      filter: enhanceSignatureInk ? 'contrast(1.35) brightness(0.82)' : undefined,
-                                      maxWidth: '94%',
-                                      maxHeight: '94%',
-                                      objectFit: 'contain',
-                                    }}
-                                  />
-                                </div>
-                              )}
-                            </div>
-                          </td>
-                        );
-                      })}
-                    </tr>
+                                {cell.signature && (
+                                  <div className="absolute inset-0 z-10 flex items-center justify-center pointer-events-none">
+                                    <img
+                                      src={cell.signature.src}
+                                      alt="signature-preview"
+                                      className="drop-shadow-sm mix-blend-multiply"
+                                      style={{
+                                        transform: cell.signature.transform,
+                                        opacity: enhanceSignatureInk ? 0.95 : cell.signature.opacity,
+                                        filter: enhanceSignatureInk ? 'contrast(1.35) brightness(0.82)' : undefined,
+                                        maxWidth: '94%',
+                                        maxHeight: '94%',
+                                        objectFit: 'contain',
+                                      }}
+                                    />
+                                  </div>
+                                )}
+                              </div>
+                            </td>
+                          );
+                        })}
+                      </tr>
                     );
                   })}
                 </tbody>

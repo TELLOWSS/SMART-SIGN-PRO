@@ -1,8 +1,9 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { Upload, FileSpreadsheet, Image as ImageIcon, CheckCircle, RotateCcw, Download, Settings, RefreshCw, AlertCircle, HelpCircle, X, ArrowRight, FileText, MousePointer2, Copy, FileDown, FolderUp, PenTool, Users, ShieldCheck } from 'lucide-react';
+import { Upload, FileSpreadsheet, Image as ImageIcon, CheckCircle, RotateCcw, Download, Settings, RefreshCw, AlertCircle, HelpCircle, X, ArrowRight, FileText, MousePointer2, Copy, FileDown, FolderUp, PenTool, Users, ShieldCheck, HardDrive, Trash2, Sparkles, Lock } from 'lucide-react';
 import { parseExcelFile, autoMatchSignatures, generateFinalExcel, normalizeName } from './services/excelService';
 import { buildSheetPreviewModel, exportToPDF, exportToPNG, SheetPreviewModel } from './services/alternativeExportService';
 import { extractFilesFromDataTransfer, extractWorkerRowsFromSheet, detectHeaderColumns, detectSelectableColumns, buildWorkerRowMap, randomInt, randomFloat } from './services/excelUtils';
+import { saveSignaturesToVault, loadSignaturesFromVault, clearSignatureVault } from './services/signatureStorage';
 import { AppState, SignatureFile, SheetData, SignatureAssignment, SignaturePlacementMode } from './types';
 import SignatureWorkspace from './components/SignatureWorkspace';
 import SignaturePadModal from './components/SignaturePadModal';
@@ -41,10 +42,13 @@ export default function App() {
   const batchAbortRef = useRef<AbortController | null>(null);
   const objectUrlRegistryRef = useRef<Set<string>>(new Set());
 
-  // 5대 실무 기능 모달 상태
+  // 5대 실무 기능 모달 및 보관함/히스토리 상태
   const [isSignaturePadOpen, setIsSignaturePadOpen] = useState(false);
   const [isManualMatchOpen, setIsManualMatchOpen] = useState(false);
   const [signaturePadTargetWorker, setSignaturePadTargetWorker] = useState<string>('');
+  const [vaultRestoredCount, setVaultRestoredCount] = useState<number>(0);
+  const [historyPast, setHistoryPast] = useState<Map<string, SignatureAssignment>[]>([]);
+  const [historyFuture, setHistoryFuture] = useState<Map<string, SignatureAssignment>[]>([]);
   
   // Refs to clear file inputs
   const excelInputRef = useRef<HTMLInputElement>(null);
@@ -54,6 +58,78 @@ export default function App() {
   // Drag and Drop 상태
   const [isDraggingExcel, setIsDraggingExcel] = useState(false);
   const [isDraggingSig, setIsDraggingSig] = useState(false);
+
+  // 앱 시작 시 브라우저 로컬 서명 보관함(IndexedDB)에서 자동 복원
+  useEffect(() => {
+    let mounted = true;
+    loadSignaturesFromVault((url) => objectUrlRegistryRef.current.add(url)).then((restored) => {
+      if (!mounted || restored.size === 0) return;
+      setState(prev => {
+        if (prev.signatures.size > 0) return prev;
+        return { ...prev, signatures: restored };
+      });
+      setVaultRestoredCount(restored.size);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  // 서명 배치 히스토리 기록 (Undo / Redo 지원)
+  const commitAssignmentsWithHistory = (
+    nextAssignments: Map<string, SignatureAssignment>,
+    extraState?: Partial<AppState>
+  ) => {
+    setHistoryPast(prev => [...prev.slice(-29), new Map(state.assignments)]);
+    setHistoryFuture([]);
+    setState(prev => ({ ...prev, ...extraState, assignments: nextAssignments }));
+  };
+
+  const handleUndo = () => {
+    if (historyPast.length === 0) return;
+    const previous = historyPast[historyPast.length - 1];
+    setHistoryPast(prev => prev.slice(0, -1));
+    setHistoryFuture(prev => [new Map(state.assignments), ...prev.slice(0, 29)]);
+    setState(prev => ({ ...prev, assignments: previous }));
+  };
+
+  const handleRedo = () => {
+    if (historyFuture.length === 0) return;
+    const next = historyFuture[0];
+    setHistoryFuture(prev => prev.slice(1));
+    setHistoryPast(prev => [...prev.slice(-29), new Map(state.assignments)]);
+    setState(prev => ({ ...prev, assignments: next }));
+  };
+
+  // 키보드 단축키: Ctrl+Z (실행 취소) / Ctrl+Y 또는 Ctrl+Shift+Z (다시 실행)
+  useEffect(() => {
+    if (state.step !== 'preview') return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT')) {
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        if (e.shiftKey) handleRedo();
+        else handleUndo();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        handleRedo();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [state.step, historyPast, historyFuture, state.assignments]);
+
+  // 브라우저 서명 보관함 비우기
+  const handleClearVault = async () => {
+    await clearSignatureVault();
+    cleanupBlobUrls(state.signatures);
+    setState(prev => ({ ...prev, signatures: new Map(), assignments: new Map() }));
+    setVaultRestoredCount(0);
+    setToast({ msg: '🗑️ 브라우저 서명 보관함을 비웠습니다.', type: 'info' });
+  };
 
   // 브라우저 기본 드래그 방지 (바탕화면/탐색기에서 파일/폴더 드롭 시 새 창 열림/이탈 방지)
   useEffect(() => {
@@ -408,6 +484,14 @@ export default function App() {
           list.push(sigFile);
           newSignatures.set(sigFile.name, list);
           count++;
+          // 브라우저 로컬 서명 보관함(IndexedDB)에 자동 저장
+          saveSignaturesToVault([{
+            name: sigFile.name,
+            variant: sigFile.variant,
+            blob: file,
+            width: w,
+            height: h,
+          }]).catch(() => {});
         } else {
           if (objectUrl) {
             revokeTrackedObjectUrl(objectUrl);
@@ -538,7 +622,7 @@ export default function App() {
     if (state.assignments.has(key)) {
       const next = new Map(state.assignments);
       next.delete(key);
-      setState(prev => ({ ...prev, assignments: next }));
+      commitAssignmentsWithHistory(next);
       return;
     }
 
@@ -603,7 +687,7 @@ export default function App() {
       }
     }
 
-    setState(prev => ({ ...prev, assignments: next }));
+    commitAssignmentsWithHistory(next);
   };
 
   /**
@@ -619,7 +703,7 @@ export default function App() {
 
     if (existingKeysInCol.length > 0) {
       for (const k of existingKeysInCol) next.delete(k);
-      setState(prev => ({ ...prev, assignments: next }));
+      commitAssignmentsWithHistory(next);
       setToast({ msg: `🗑️ [${label}] 열 서명 ${existingKeysInCol.length}건 일괄 해제`, type: 'info' });
       return;
     }
@@ -674,7 +758,7 @@ export default function App() {
       }
     }
 
-    setState(prev => ({ ...prev, assignments: next }));
+    commitAssignmentsWithHistory(next);
     if (added > 0) {
       const extraMsg = linkedSigCount > 0 ? ` + 서명 열 ${linkedSigCount}건 자동 연동` : '';
       setToast({ msg: `✅ [${label}] 열에 ${added}명 서명 지정${extraMsg}`, type: 'success' });
@@ -687,8 +771,8 @@ export default function App() {
    * 현재 배치된 서명 전체 비우기 (원하는 품목/칸만 직접 선택 시작)
    */
   const handleClearAllAssignments = () => {
-    setState(prev => ({ ...prev, assignments: new Map() }));
-    setToast({ msg: '모든 서명 배치를 초기화했습니다. 원하는 품목이나 칸을 클릭해 지정하세요.', type: 'info' });
+    commitAssignmentsWithHistory(new Map());
+    setToast({ msg: '모든 서명 배치를 초기화했습니다. (Ctrl+Z로 되돌리기 가능)', type: 'info' });
   };
 
   /**
@@ -1115,10 +1199,13 @@ export default function App() {
       batchAbortRef.current = null;
     }
 
-    cleanupBlobUrls(state.signatures);
-    revokeAllTrackedObjectUrls();
-
-    setState(getInitialState());
+    setState(prev => ({
+      ...getInitialState(),
+      // 서명 보관함은 유지하여 다음 엑셀 양식을 3초 만에 연속 작업할 수 있도록 함
+      signatures: prev.signatures,
+    }));
+    setHistoryPast([]);
+    setHistoryFuture([]);
     setPreviewModel(null);
     setPreviewLoading(false);
     setBatchProgress(null);
@@ -1127,7 +1214,7 @@ export default function App() {
     setBatchCount(5);
     setExportFormat('excel');
     setError(null);
-    setToast({ msg: '새 파일 작업을 시작할 수 있도록 초기화되었습니다.', type: 'info' });
+    setToast({ msg: '새 엑셀 양식을 올리면 보관된 서명으로 바로 작업할 수 있습니다.', type: 'info' });
 
     if (excelInputRef.current) excelInputRef.current.value = '';
     if (sigInputRef.current) sigInputRef.current.value = '';
@@ -1135,9 +1222,7 @@ export default function App() {
   };
 
   const handleReset = () => {
-    if (window.confirm("정말로 처음부터 다시 시작하시겠습니까?\n모든 데이터가 초기화됩니다.")) {
-      startOver();
-    }
+    startOver();
   };
 
   const handleBackToPreview = () => {
@@ -1147,7 +1232,32 @@ export default function App() {
   // --- Render Steps ---
 
   const renderUploadStep = () => (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-8 w-full max-w-4xl mx-auto mt-10 px-4">
+    <div className="w-full max-w-5xl mx-auto mt-8 px-4 pb-12 space-y-8">
+      {/* Hero Banner */}
+      <div className="text-center space-y-3">
+        <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-indigo-50 border border-indigo-200/80 text-indigo-700 text-xs font-semibold">
+          <Sparkles size={13} /> 건설·안전 현장 서명 자동화 스튜디오 v2.0
+        </div>
+        <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight">
+          엑셀 양식 그대로, 수기 서명 1초 자동화
+        </h2>
+        <p className="text-sm text-slate-500 max-w-2xl mx-auto">
+          원본 로고·테두리·서식을 100% 무손실 보존하며, 엑셀에 '1'을 적지 않아도 화면에서 원하는 품목과 근로자를 클릭해 서명할 수 있습니다.
+        </p>
+        <div className="flex flex-wrap items-center justify-center gap-2 pt-1 text-[11px] font-medium text-slate-600">
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white border border-slate-200 shadow-sm">
+            <ShieldCheck size={13} className="text-emerald-600" /> OOXML 무손실 원본 보존
+          </span>
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white border border-slate-200 shadow-sm">
+            <HardDrive size={13} className="text-indigo-600" /> 브라우저 서명 보관함 자동 저장
+          </span>
+          <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white border border-slate-200 shadow-sm">
+            <Lock size={13} className="text-slate-600" /> 서버 전송 없음 (100% 로컬 처리)
+          </span>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
       {/* Excel Upload Card (Drag & Drop 지원) */}
       <div 
         onDragOver={(e) => {
@@ -1338,22 +1448,36 @@ export default function App() {
           </div>
           
           {state.signatures.size > 0 && (
-            <div className="flex items-center gap-2 text-green-600 text-sm font-medium">
-              <CheckCircle size={16} />
-              {state.signatures.size}명의 서명 확인됨 ({Array.from(state.signatures.values()).flat().length}개 파일)
+            <div className="w-full pt-2 border-t border-slate-100 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 text-emerald-700 text-xs font-semibold">
+                <CheckCircle size={15} />
+                <span>
+                  {state.signatures.size}명 확인됨 ({Array.from(state.signatures.values()).flat().length}개 파일)
+                  {vaultRestoredCount > 0 && ' · 보관함 자동 복원'}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={handleClearVault}
+                className="inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium text-rose-600 hover:bg-rose-50 transition-colors"
+                title="브라우저에 자동 저장된 서명 보관함을 비웁니다"
+              >
+                <Trash2 size={12} /> 보관함 비우기
+              </button>
             </div>
           )}
         </div>
       </div>
+      </div>
 
-      <div className="md:col-span-2 flex justify-center mt-4 pb-10">
+      <div className="flex justify-center pt-2">
         <button 
-          onClick={runAutoMatch}
+          onClick={() => runAutoMatch()}
           disabled={!state.excelFile || state.signatures.size === 0 || processing}
-          className="bg-indigo-600 text-white px-10 py-4 rounded-xl text-lg font-bold shadow-xl hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-3 transition-all"
+          className="bg-indigo-600 text-white px-10 py-4 rounded-2xl text-base font-bold shadow-lg shadow-indigo-200 hover:bg-indigo-700 hover:shadow-xl disabled:opacity-45 disabled:shadow-none disabled:cursor-not-allowed flex items-center gap-3 transition-all"
         >
-          {processing ? <RefreshCw className="animate-spin" /> : <Settings />}
-          자동 매칭 시작
+          {processing ? <RefreshCw className="animate-spin" size={20} /> : <ArrowRight size={20} />}
+          자동 매칭 및 미리보기 시작
         </button>
       </div>
     </div>
@@ -1381,6 +1505,10 @@ export default function App() {
         unmatchedWorkerCount={unmatchedWorkerCount}
         selectableColumns={selectableColumns}
         workerRowMap={workerRowMap}
+        canUndo={historyPast.length > 0}
+        canRedo={historyFuture.length > 0}
+        onUndo={handleUndo}
+        onRedo={handleRedo}
         onToggleColumnSignatures={handleToggleColumnSignatures}
         onToggleCellSignature={handleToggleCellSignature}
         onClearAllAssignments={handleClearAllAssignments}
@@ -1460,27 +1588,68 @@ export default function App() {
       )}
 
       {/* Header */}
-      <header className="bg-white border-b border-gray-200 sticky top-0 z-50">
-        <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="bg-orange-500 text-white p-1.5 rounded-lg">
-              <CheckCircle size={20} strokeWidth={3} />
+      <header className="bg-white/90 backdrop-blur-md border-b border-slate-200/80 sticky top-0 z-50">
+        <div className="max-w-[1600px] mx-auto px-4 h-16 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-2.5">
+            <div className="bg-gradient-to-br from-indigo-600 to-violet-600 text-white p-1.5 rounded-xl shadow-sm">
+              <CheckCircle size={20} strokeWidth={2.5} />
             </div>
-            <h1 className="text-xl font-bold tracking-tight text-gray-900">
-              Safety<span className="text-orange-600">Sign</span>Pro
-            </h1>
+            <div>
+              <h1 className="text-lg font-extrabold tracking-tight text-slate-900 leading-none">
+                SMART<span className="text-indigo-600">SIGN</span>PRO
+              </h1>
+              <span className="text-[10px] font-semibold text-slate-400 tracking-wide">
+                PSI AI STUDIO · v2.0
+              </span>
+            </div>
           </div>
-          <div className="flex items-center gap-4">
+
+          {/* 3-Step Visual Progress Stepper */}
+          <nav className="hidden md:flex items-center gap-2 text-xs font-semibold">
+            {[
+              { id: 'upload', num: 1, label: '파일·서명 준비' },
+              { id: 'preview', num: 2, label: '서명 배치·미리보기' },
+              { id: 'export', num: 3, label: '무손실 내보내기' },
+            ].map((s, idx) => {
+              const stepOrder = { upload: 0, preview: 1, export: 2 };
+              const curIdx = stepOrder[state.step];
+              const isActive = state.step === s.id;
+              const isDone = curIdx > idx;
+              return (
+                <React.Fragment key={s.id}>
+                  <div
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-full transition-colors ${
+                      isActive
+                        ? 'bg-indigo-600 text-white shadow-sm'
+                        : isDone
+                          ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                          : 'bg-slate-100 text-slate-400'
+                    }`}
+                  >
+                    <span className={`w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold ${
+                      isActive ? 'bg-white text-indigo-600' : isDone ? 'bg-emerald-600 text-white' : 'bg-slate-300 text-white'
+                    }`}>
+                      {s.num}
+                    </span>
+                    <span>{s.label}</span>
+                  </div>
+                  {idx < 2 && <ArrowRight size={13} className="text-slate-300" />}
+                </React.Fragment>
+              );
+            })}
+          </nav>
+
+          <div className="flex items-center gap-3">
+            <span className="hidden lg:inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-slate-100 text-slate-600 text-[11px] font-medium">
+              <Lock size={11} className="text-emerald-600" /> 100% 로컬 처리
+            </span>
             <button 
               onClick={() => setShowGuide(true)}
-              className="text-gray-600 hover:text-indigo-600 font-medium text-sm flex items-center gap-1.5 transition-colors"
+              className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-indigo-50 text-slate-700 hover:text-indigo-700 font-semibold text-xs flex items-center gap-1.5 transition-colors"
             >
-              <HelpCircle size={18} />
+              <HelpCircle size={15} />
               이용 가이드
             </button>
-            <div className="text-sm text-gray-400 font-medium hidden sm:block">
-              개인보호구 지급대장 자동화 v1.0
-            </div>
           </div>
         </div>
       </header>
