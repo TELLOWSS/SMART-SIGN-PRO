@@ -615,4 +615,104 @@ export const extractWorkerRowsFromSheet = (
   return workerItems;
 };
 
+export interface SelectableColumnInfo {
+  col: number;           // 1-based Excel column
+  label: string;         // 예: '안전모', '안전화', '서명'
+  isSignatureCol: boolean;
+}
+
+/**
+ * 시트 헤더(다단 병합 헤더 포함)에서 사용자가 서명을 자유롭게 배치할 수 있는
+ * 모든 품목/항목/서명 열을 자동 추출한다.
+ * - '1' 표시 없이도 원하는 품목(안전모, 안전화, 보안경 등)이나 서명 열을 클릭 한 번으로 지정할 수 있도록 지원.
+ */
+export const detectSelectableColumns = (
+  rows: { index: number; cells: { row: number; col: number; value: any; address: string }[] }[]
+): SelectableColumnInfo[] => {
+  const detected = detectHeaderColumns(rows);
+  if (detected.nameCol === -1 || detected.headerRowIndex === -1) return [];
+
+  const { headerRowIndex, nameCol, residentCol, jobCol, companyCol, signatureCols } = detected;
+  const sigColSet = new Set(signatureCols.map(s => s.col));
+  const excludedCols = new Set<number>([nameCol]);
+  if (residentCol !== -1) excludedCols.add(residentCol);
+  if (jobCol !== -1) excludedCols.add(jobCol);
+  if (companyCol !== -1) excludedCols.add(companyCol);
+
+  // 헤더 밴드(headerRowIndex ~ headerRowIndex + 2)에서 각 열의 최하위(가장 구체적인) 라벨을 수집
+  // 예: 4행='품목'(병합), 5행='안전화' -> col 6의 라벨은 '안전화'
+  const bandStart = headerRowIndex;
+  const bandEnd = Math.min(rows.length - 1, headerRowIndex + 2);
+  const colLabelMap = new Map<number, string>();
+
+  for (let r = bandStart; r <= bandEnd; r++) {
+    const row = rows[r];
+    // 데이터 행이 이미 시작되었으면(성명 열에 헤더가 아닌 근로자 이름이 있으면) 중단
+    if (r > headerRowIndex) {
+      const nameCell = row.cells.find(c => c.col === nameCol);
+      const nameVal = nameCell?.value ? String(nameCell.value).trim() : '';
+      if (nameVal && !/^(성명|이름)$/i.test(nameVal.replace(/\s+/g, ''))) {
+        break;
+      }
+    }
+
+    for (const cell of row.cells) {
+      if (!cell.value) continue;
+      if (excludedCols.has(cell.col)) continue;
+      const raw = String(cell.value).replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+      if (!raw || raw.length > 20) continue;
+
+      const compact = raw.replace(/\s+/g, '');
+      // 메타데이터 열(No, 번호, 일시, 날짜, 비고 등) 제외
+      if (/^(no\.?|번호|연번|순번|일시|일자|날짜|작업일|지급일|소속|업체|업체명|직종|직위|공종|주민등록번호|주민번호|비고|품목|지급품목)$/i.test(compact)) {
+        continue;
+      }
+
+      colLabelMap.set(cell.col, raw);
+    }
+  }
+
+  // 감지된 서명 전용 열은 항상 포함
+  for (const sc of signatureCols) {
+    if (!colLabelMap.has(sc.col)) {
+      colLabelMap.set(sc.col, sc.label);
+    }
+  }
+
+  return Array.from(colLabelMap.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([col, label]) => ({
+      col,
+      label,
+      isSignatureCol: sigColSet.has(col),
+    }));
+};
+
+/**
+ * 1-based 엑셀 행 번호 -> 근로자 성명 매핑 테이블 생성
+ * - 라이브 프리뷰에서 사용자가 특정 셀(행, 열)을 클릭할 때 해당 행의 근로자를 즉시 식별
+ */
+export const buildWorkerRowMap = (
+  rows: { index: number; cells: { row: number; col: number; value: any; address: string }[] }[]
+): Map<number, { workerName: string; nameCol: number }> => {
+  const result = new Map<number, { workerName: string; nameCol: number }>();
+  const detected = detectHeaderColumns(rows);
+  if (detected.nameCol === -1 || detected.headerRowIndex === -1) return result;
+
+  for (let r = detected.headerRowIndex + 1; r < rows.length; r++) {
+    const row = rows[r];
+    const nameCell = row.cells.find(c => c.col === detected.nameCol);
+    if (!nameCell || !nameCell.value) continue;
+
+    const workerName = String(nameCell.value).trim();
+    const compact = workerName.replace(/[\s\u00A0\uFEFF]+/g, '');
+    if (!compact || /^(성명|이름|소계|합계|계|총계|비고)$/i.test(compact)) continue;
+
+    result.set(row.index, { workerName, nameCol: detected.nameCol });
+  }
+
+  return result;
+};
+
+
 

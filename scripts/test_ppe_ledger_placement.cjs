@@ -153,10 +153,65 @@ async function run() {
   );
   console.log('REAL EXCEL COM:', psOut.trim());
   assert.ok(psOut.includes('PASS | Saved=True | Shapes=3 | F6=1'), 'Real Excel COM must open cleanly with 3 shapes and F6 quantity=1 intact');
-  console.log('\n=== ALL PPE LEDGER REAL-WORLD CHECKS PASSED 100%! ===');
+
+  // 5. Verify selectable item columns & custom per-worker item placement WITHOUT '1'
+  const selectableCols = excelUtils.detectSelectableColumns(parsed.rows);
+  console.log('Selectable item/signature columns:', selectableCols.map(c => `${c.col}:${c.label}`).join(', '));
+  assert.equal(selectableCols.length, 11, '10개 보호구 품목 + 1개 서명 열 = 총 11개 선택 가능 열');
+  assert.equal(selectableCols[0].label, '안전모');
+  assert.equal(selectableCols[1].label, '안전화');
+  assert.equal(selectableCols[10].label, '서명');
+
+  const workerMap = excelUtils.buildWorkerRowMap(parsed.rows);
+  assert.equal(workerMap.get(6)?.workerName, '박종염');
+  assert.equal(workerMap.get(7)?.workerName, '이호염');
+  assert.equal(workerMap.get(8)?.workerName, '백성철');
+
+  // Custom worker × item assignments (no '1' needed!)
+  const customAssignments = new Map();
+  const customPairs = [
+    [6, 5, '박종염'],  // 박종염 -> 안전모
+    [6, 6, '박종염'],  // 박종염 -> 안전화
+    [6, 15, '박종염'], // 박종염 -> 서명
+    [7, 8, '이호염'],  // 이호염 -> 보안경
+    [7, 15, '이호염'], // 이호염 -> 서명
+    [8, 12, '백성철'], // 백성철 -> 방진마스크
+  ];
+  for (const [r, c, name] of customPairs) {
+    customAssignments.set(`${r}:${c}`, {
+      row: r,
+      col: c,
+      signatureBaseName: name,
+      signatureVariantId: `${name}_1.png`,
+      rotation: 0,
+      scale: 1.0,
+      offsetX: 0,
+      offsetY: 0,
+    });
+  }
+  const customBlob = await excelService.generateFinalExcel(arrBuf, customAssignments, sigs, {
+    targetSheetIndex: 0,
+    scaleMultiplier: 1.0,
+    enhanceSignatureInk: true,
+  });
+  const customBuf = await customBlob.arrayBuffer();
+  const customCheck = await ooxmlUtils.validateXlsxIntegrity(customBuf);
+  assert.equal(customCheck.valid, true, `Custom item placement OOXML failed: ${customCheck.issues.join('; ')}`);
+
+  const customPath = path.join(tmpDir, 'ppe_custom_items.xlsx');
+  fs.writeFileSync(customPath, Buffer.from(customBuf));
+  const customPsOut = execSync(
+    `powershell -NoProfile -ExecutionPolicy Bypass -Command "$e = New-Object -ComObject Excel.Application; $e.Visible=$false; $e.DisplayAlerts=$false; $wb=$e.Workbooks.Open('${customPath.replace(/'/g, "''")}', 0, $true); $ws=$wb.Worksheets.Item(1); Write-Output ('PASS_CUSTOM | Saved=' + $wb.Saved + ' | Shapes=' + $ws.Shapes.Count); $wb.Close($false); $e.Quit()"`,
+    { encoding: 'utf8', timeout: 30000 }
+  );
+  console.log('REAL EXCEL COM (CUSTOM WORKER x ITEM):', customPsOut.trim());
+  assert.ok(customPsOut.includes('PASS_CUSTOM | Saved=True | Shapes=6'), 'Custom worker×item Excel must open with 6 shapes cleanly');
+
+  console.log('\n=== ALL PPE LEDGER & CUSTOM ITEM SELECTION CHECKS PASSED 100%! ===');
 }
 
 run().catch(err => {
   console.error('TEST FAILED:', err);
   process.exit(1);
 });
+

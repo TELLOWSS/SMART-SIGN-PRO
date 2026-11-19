@@ -15,6 +15,9 @@ import {
   AlertTriangle,
   Crosshair,
   Sparkles,
+  Check,
+  Trash2,
+  MousePointerClick,
 } from 'lucide-react';
 import { SheetPreviewModel } from '../services/alternativeExportService';
 import { SignaturePlacementMode } from '../types';
@@ -44,6 +47,11 @@ interface SignatureWorkspaceProps {
   availableSheets: string[];
   activeSheetIndex: number;
   unmatchedWorkerCount: number;
+  selectableColumns: { col: number; label: string; isSignatureCol: boolean; assignedCount: number }[];
+  workerRowMap: Map<number, { workerName: string; nameCol: number }>;
+  onToggleColumnSignatures: (col: number, label: string) => void;
+  onToggleCellSignature: (row: number, col: number) => void;
+  onClearAllAssignments: () => void;
   onVariationStrengthChange: (value: number) => void;
   onBatchCountChange: (value: number) => void;
   onExportFormatChange: (format: 'excel' | 'pdf' | 'png') => void;
@@ -86,6 +94,11 @@ export default function SignatureWorkspace(props: SignatureWorkspaceProps) {
     availableSheets,
     activeSheetIndex,
     unmatchedWorkerCount,
+    selectableColumns,
+    workerRowMap,
+    onToggleColumnSignatures,
+    onToggleCellSignature,
+    onClearAllAssignments,
     onVariationStrengthChange,
     onBatchCountChange,
     onExportFormatChange,
@@ -426,8 +439,15 @@ export default function SignatureWorkspace(props: SignatureWorkspaceProps) {
         {/* Header with multi-sheet tabs */}
         <div className="px-5 py-3 border-b border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h3 className="text-sm font-semibold text-slate-800">Live Preview</h3>
-            <p className="text-xs text-slate-500">병합 셀 구조와 서명 오버레이 상태를 실시간으로 확인합니다.</p>
+            <h3 className="text-sm font-semibold text-slate-800 flex items-center gap-2">
+              Live Preview
+              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 text-[11px] font-medium border border-indigo-100">
+                <MousePointerClick size={11} /> 칸 직접 클릭으로 자유 서명 지정
+              </span>
+            </h3>
+            <p className="text-xs text-slate-500 mt-0.5">
+              엑셀에 '1'을 적지 않아도, 아래 품목 버튼이나 표의 원하는 근로자·품목 칸을 클릭하면 서명이 즉시 추가/해제됩니다.
+            </p>
           </div>
 
           {/* 다중 워크시트(월별/공종별 탭) 선택 */}
@@ -455,6 +475,54 @@ export default function SignatureWorkspace(props: SignatureWorkspaceProps) {
           )}
         </div>
 
+        {/* 원하는 품목/서명 열 일괄 지정 칩 바 ('1' 없이 1클릭 전체 지정/해제) */}
+        {selectableColumns && selectableColumns.length > 0 && (
+          <div className="px-5 py-2.5 border-b border-slate-200 bg-white flex flex-wrap items-center gap-1.5">
+            <span className="text-[11px] font-bold text-slate-600 mr-1 whitespace-nowrap">
+              품목 일괄 지정:
+            </span>
+            {selectableColumns.map((colInfo) => {
+              const isActive = colInfo.assignedCount > 0;
+              return (
+                <button
+                  key={`col-chip-${colInfo.col}`}
+                  type="button"
+                  onClick={() => onToggleColumnSignatures(colInfo.col, colInfo.label)}
+                  disabled={processing}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition-all border ${
+                    isActive
+                      ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm hover:bg-indigo-700'
+                      : colInfo.isSignatureCol
+                        ? 'bg-emerald-50 text-emerald-800 border-emerald-200 hover:bg-emerald-100'
+                        : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-indigo-50 hover:border-indigo-200 hover:text-indigo-700'
+                  }`}
+                  title={`클릭하여 [${colInfo.label}] 열 전체 근로자 서명 일괄 지정/해제`}
+                >
+                  {isActive && <Check size={12} />}
+                  <span>{colInfo.label}</span>
+                  {isActive && (
+                    <span className="ml-0.5 px-1.5 py-0.2 rounded-full bg-white/20 text-[10px] font-bold">
+                      {colInfo.assignedCount}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+
+            {assignmentCount > 0 && (
+              <button
+                type="button"
+                onClick={onClearAllAssignments}
+                disabled={processing}
+                className="ml-auto inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-medium text-rose-600 bg-rose-50 border border-rose-200 hover:bg-rose-100 transition-colors"
+                title="현재 배치된 모든 서명을 초기화하고 원하는 칸만 직접 선택합니다"
+              >
+                <Trash2 size={11} /> 전체 비우기
+              </button>
+            )}
+          </div>
+        )}
+
         <div className="flex-1 overflow-auto p-4 bg-slate-100">
           <div className="inline-block min-w-full bg-white rounded-lg border border-slate-200 shadow-sm overflow-hidden">
             {previewLoading && (
@@ -464,17 +532,34 @@ export default function SignatureWorkspace(props: SignatureWorkspaceProps) {
             {!previewLoading && previewModel && (
               <table className="border-collapse w-full table-auto">
                 <tbody>
-                  {previewModel.rows.map((row) => (
+                  {previewModel.rows.map((row) => {
+                    const workerInfo = workerRowMap.get(row.row);
+                    return (
                     <tr key={`preview-row-${row.row}`} className="border-b border-slate-200 hover:bg-slate-50/40">
                       {row.cells.map((cell) => {
                         if (cell.hidden) return null;
+
+                        const isInteractiveCell = !!workerInfo && cell.col !== workerInfo.nameCol;
+                        const colLabel = selectableColumns.find(c => c.col === cell.col)?.label;
 
                         return (
                           <td
                             key={cell.key}
                             rowSpan={cell.rowSpan}
                             colSpan={cell.colSpan}
-                            className="border-r border-slate-200 px-2 py-1 text-xs sm:text-sm relative min-w-[64px]"
+                            onClick={isInteractiveCell && !processing ? () => onToggleCellSignature(cell.row, cell.col) : undefined}
+                            title={
+                              isInteractiveCell
+                                ? `${workerInfo.workerName}${colLabel ? ` · [${colLabel}]` : ''} — 클릭하여 서명 ${cell.signature ? '해제' : '추가'}`
+                                : undefined
+                            }
+                            className={`border-r border-slate-200 px-2 py-1 text-xs sm:text-sm relative min-w-[64px] select-none ${
+                              isInteractiveCell
+                                ? cell.signature
+                                  ? 'cursor-pointer bg-indigo-50/40 hover:bg-rose-50/60 hover:ring-1 hover:ring-inset hover:ring-rose-300 transition-colors'
+                                  : 'cursor-pointer hover:bg-indigo-50/70 hover:ring-1 hover:ring-inset hover:ring-indigo-300 transition-colors'
+                                : ''
+                            }`}
                             style={{
                               fontFamily: cell.style.fontFamily,
                               fontSize: cell.style.fontSize,
@@ -509,7 +594,8 @@ export default function SignatureWorkspace(props: SignatureWorkspaceProps) {
                         );
                       })}
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
               </table>
             )}

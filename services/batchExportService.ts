@@ -1,6 +1,7 @@
 import JSZip from 'jszip';
-import { SignatureFile, SheetData, SignaturePlacementMode } from '../types';
+import { SignatureFile, SheetData, SignaturePlacementMode, SignatureAssignment } from '../types';
 import { autoMatchSignatures, generateFinalExcel } from './excelService';
+import { randomInt, randomFloat } from './excelUtils';
 
 export interface BatchExportProgress {
   current: number;
@@ -23,6 +24,8 @@ export interface BatchExcelZipOptions {
   targetSheetIndex?: number;
   placementMode?: SignaturePlacementMode;
   enhanceSignatureInk?: boolean;
+  /** 사용자가 품목 칩/개별 클릭/수동 매칭으로 지정한 현재 배치 상태 (있으면 정확한 셀 위치를 유지하며 변형만 랜덤화) */
+  baseAssignments?: Map<string, SignatureAssignment>;
   onProgress?: (progress: BatchExportProgress) => void;
   signal?: AbortSignal;
 }
@@ -80,11 +83,38 @@ export const buildBatchExcelZip = async (options: BatchExcelZipOptions): Promise
     await new Promise(resolve => setTimeout(resolve, mode === 'high-volume' ? 16 : 0));
     throwIfAborted(signal);
 
-    const assignments = autoMatchSignatures(sheetData, signatures, {
-      variationStrength,
-      scaleMultiplier: options.scaleMultiplier,
-      placementMode: options.placementMode,
-    });
+    let assignments: Map<string, SignatureAssignment>;
+    if (options.baseAssignments && options.baseAssignments.size > 0) {
+      const strengthFactor = Math.max(0, Math.min(100, variationStrength)) / 100;
+      const scaleMult = options.scaleMultiplier ?? 1.0;
+      const minScale = 1.0 - 0.06 * strengthFactor;
+      const maxScale = 1.0 + 0.06 * strengthFactor;
+      const rotLimit = Math.max(1, Math.round(1 + strengthFactor * 3));
+      const oxLimit = Math.max(1, Math.round(1 + strengthFactor * 3));
+      const oyLimit = Math.max(1, Math.round(1 + strengthFactor * 2));
+
+      assignments = new Map();
+      for (const [key, base] of options.baseAssignments.entries()) {
+        const sigList = signatures.get(base.signatureBaseName);
+        const picked = sigList && sigList.length > 0
+          ? sigList[Math.floor(Math.random() * sigList.length)]
+          : null;
+        assignments.set(key, {
+          ...base,
+          signatureVariantId: picked ? picked.variant : base.signatureVariantId,
+          rotation: randomInt(-rotLimit, rotLimit),
+          scale: randomFloat(minScale, maxScale) * scaleMult,
+          offsetX: randomInt(-oxLimit, oxLimit),
+          offsetY: randomInt(-oyLimit, oyLimit),
+        });
+      }
+    } else {
+      assignments = autoMatchSignatures(sheetData, signatures, {
+        variationStrength,
+        scaleMultiplier: options.scaleMultiplier,
+        placementMode: options.placementMode,
+      });
+    }
     const excelBlob = await generateFinalExcel(originalBuffer, assignments, signatures, {
       maskResidentNumber: options.maskResidentNumber,
       targetSheetIndex: options.targetSheetIndex,
