@@ -2,8 +2,8 @@ import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { Upload, FileSpreadsheet, Image as ImageIcon, CheckCircle, RotateCcw, Download, Settings, RefreshCw, AlertCircle, HelpCircle, X, ArrowRight, FileText, MousePointer2, Copy, FileDown, FolderUp, PenTool, Users, ShieldCheck } from 'lucide-react';
 import { parseExcelFile, autoMatchSignatures, generateFinalExcel, normalizeName } from './services/excelService';
 import { buildSheetPreviewModel, exportToPDF, exportToPNG, SheetPreviewModel } from './services/alternativeExportService';
-import { extractFilesFromDataTransfer, extractWorkerRowsFromSheet } from './services/excelUtils';
-import { AppState, SignatureFile, SheetData, SignatureAssignment } from './types';
+import { extractFilesFromDataTransfer, extractWorkerRowsFromSheet, detectHeaderColumns } from './services/excelUtils';
+import { AppState, SignatureFile, SheetData, SignatureAssignment, SignaturePlacementMode } from './types';
 import SignatureWorkspace from './components/SignatureWorkspace';
 import SignaturePadModal from './components/SignaturePadModal';
 import ManualMatchModal from './components/ManualMatchModal';
@@ -21,6 +21,8 @@ const getInitialState = (): AppState => ({
   activeSheetIndex: 0,
   maskResidentNumber: false,
   signatureScalePreset: 1.0,
+  placementMode: 'auto',
+  enhanceSignatureInk: true,
 });
 
 export default function App() {
@@ -179,11 +181,19 @@ export default function App() {
     };
   }, [state.step, state.excelBuffer, state.assignments, state.signatures, state.maskResidentNumber, state.activeSheetIndex]);
 
+  // 감지된 전용 '서명' 열 라벨 계산
+  const detectedSignatureColLabel = useMemo(() => {
+    if (!state.sheetData) return null;
+    const detected = detectHeaderColumns(state.sheetData.rows);
+    if (detected.signatureCols.length === 0) return null;
+    return detected.signatureCols.map(s => s.label).join(', ');
+  }, [state.sheetData]);
+
   // 근로자 매칭 상태 목록 및 미매칭 카운트 계산
   const workerItems = useMemo(() => {
     if (!state.sheetData) return [];
-    return extractWorkerRowsFromSheet(state.sheetData.rows, state.assignments, state.signatures);
-  }, [state.sheetData, state.assignments, state.signatures]);
+    return extractWorkerRowsFromSheet(state.sheetData.rows, state.assignments, state.signatures, state.placementMode);
+  }, [state.sheetData, state.assignments, state.signatures, state.placementMode]);
 
   const unmatchedWorkerCount = useMemo(() => {
     return workerItems.filter(w => !w.isMatched).length;
@@ -441,18 +451,57 @@ export default function App() {
         const assignments = autoMatchSignatures(state.sheetData, state.signatures, {
           variationStrength,
           scaleMultiplier: effectiveScale,
+          placementMode: state.placementMode,
         });
         setState(prev => ({ ...prev, assignments, step: 'preview' }));
         setProcessing(false);
         
         if (assignments.size === 0) {
-          setError("매칭된 서명이 없습니다. 엑셀 파일에 '성명' 열과 서명 기호(1)가 있는지 확인해주세요.");
+          setError("매칭된 서명이 없습니다. 엑셀 파일에 '성명' 열과 '서명' 열(또는 서명 기호 1)이 있는지 확인해주세요.");
           setToast({ msg: '⚠️ 매칭 실패', type: 'info' });
         } else {
           const signatureCount = new Set(Array.from(assignments.values()).map(a => a.signatureBaseName)).size;
           setToast({ msg: `✅ ${assignments.size}개 위치에 ${signatureCount}명의 서명이 배치되었습니다`, type: 'success' });
         }
     }, 100);
+  };
+
+  /**
+   * 0. 서명 배치 위치 모드 전환 핸들러 (서명 열 전용 vs 1 표시 셀 전체)
+   */
+  const handlePlacementModeChange = (mode: SignaturePlacementMode) => {
+    setState(prev => {
+      if (!prev.sheetData) return { ...prev, placementMode: mode };
+      const updatedAssignments = prev.signatures.size > 0
+        ? autoMatchSignatures(prev.sheetData, prev.signatures, {
+            variationStrength,
+            scaleMultiplier: prev.signatureScalePreset,
+            placementMode: mode,
+          })
+        : prev.assignments;
+      return {
+        ...prev,
+        placementMode: mode,
+        assignments: updatedAssignments,
+      };
+    });
+    setToast({
+      msg: mode === 'placeholderCells'
+        ? "배치 모드 변경: '1' 표시 셀 전체에 서명 배치"
+        : "배치 모드 변경: 전용 '서명' 열에만 배치 (수량 1 보호)",
+      type: 'info',
+    });
+  };
+
+  /**
+   * 0-2. 서명 여백 제거 및 잉크 선명도 보정 토글
+   */
+  const handleEnhanceSignatureInkChange = (value: boolean) => {
+    setState(prev => ({ ...prev, enhanceSignatureInk: value }));
+    setToast({
+      msg: value ? '✨ 서명 여백 자동 제거 · 진하게 보정 활성화' : '서명 원본 명암 유지',
+      type: 'info',
+    });
   };
 
   /**
@@ -473,10 +522,9 @@ export default function App() {
     setState(prev => {
       const updatedAssignments = new Map<string, SignatureAssignment>();
       for (const [key, assignment] of prev.assignments.entries()) {
-        const baseScale = 1.25;
         updatedAssignments.set(key, {
           ...assignment,
-          scale: baseScale * newScale,
+          scale: newScale,
         });
       }
       return {
@@ -502,6 +550,7 @@ export default function App() {
         ? autoMatchSignatures(newSheetData, state.signatures, {
             variationStrength,
             scaleMultiplier: state.signatureScalePreset,
+            placementMode: state.placementMode,
           })
         : new Map();
 
@@ -531,9 +580,10 @@ export default function App() {
     if (state.sheetData) {
       setTimeout(() => {
         if (!state.sheetData) return;
-        const updatedAssignments = autoMatchSignatures(state.sheetData, state.signatures, {
+        const updatedAssignments = autoMatchSignatures(state.sheetData, signaturesRef.current, {
           variationStrength,
           scaleMultiplier: state.signatureScalePreset,
+          placementMode: state.placementMode,
         });
         setState(prev => ({
           ...prev,
@@ -565,7 +615,7 @@ export default function App() {
           signatureBaseName: match.signatureBaseName,
           signatureVariantId: match.signatureVariantId,
           rotation: 0,
-          scale: 1.25 * state.signatureScalePreset,
+          scale: state.signatureScalePreset,
           offsetX: 0,
           offsetY: 0,
         });
@@ -608,7 +658,11 @@ export default function App() {
     try {
       let assignmentsToUse = state.assignments;
       if (isRetry && state.sheetData) {
-        assignmentsToUse = autoMatchSignatures(state.sheetData, state.signatures, { variationStrength });
+        assignmentsToUse = autoMatchSignatures(state.sheetData, state.signatures, {
+          variationStrength,
+          scaleMultiplier: state.signatureScalePreset,
+          placementMode: state.placementMode,
+        });
         setState(prev => ({ ...prev, assignments: assignmentsToUse }));
       }
 
@@ -663,6 +717,7 @@ export default function App() {
           maskResidentNumber: state.maskResidentNumber,
           targetSheetIndex: state.activeSheetIndex,
           scaleMultiplier: state.signatureScalePreset,
+          enhanceSignatureInk: state.enhanceSignatureInk,
         });
         
         const elapsed = performance.now() - startTime;
@@ -765,6 +820,8 @@ export default function App() {
         maskResidentNumber: state.maskResidentNumber,
         scaleMultiplier: state.signatureScalePreset,
         targetSheetIndex: state.activeSheetIndex,
+        placementMode: state.placementMode,
+        enhanceSignatureInk: state.enhanceSignatureInk,
         onProgress: setBatchProgress,
         signal: abortController.signal,
       });
@@ -1088,6 +1145,9 @@ export default function App() {
         batchProgress={batchProgress}
         maskResidentNumber={state.maskResidentNumber}
         signatureScalePreset={state.signatureScalePreset}
+        placementMode={state.placementMode}
+        detectedSignatureColLabel={detectedSignatureColLabel}
+        enhanceSignatureInk={state.enhanceSignatureInk}
         availableSheets={state.availableSheets}
         activeSheetIndex={state.activeSheetIndex}
         unmatchedWorkerCount={unmatchedWorkerCount}
@@ -1096,6 +1156,8 @@ export default function App() {
         onExportFormatChange={setExportFormat}
         onMaskResidentNumberChange={handleMaskResidentNumberChange}
         onSignatureScalePresetChange={handleSignatureScalePresetChange}
+        onPlacementModeChange={handlePlacementModeChange}
+        onEnhanceSignatureInkChange={handleEnhanceSignatureInkChange}
         onSelectSheet={handleSelectSheet}
         onOpenManualMatch={() => setIsManualMatchOpen(true)}
         onOpenSignaturePad={() => {

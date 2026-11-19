@@ -13,8 +13,11 @@ import {
   PenTool,
   Layers,
   AlertTriangle,
+  Crosshair,
+  Sparkles,
 } from 'lucide-react';
 import { SheetPreviewModel } from '../services/alternativeExportService';
+import { SignaturePlacementMode } from '../types';
 
 interface BatchProgress {
   current: number;
@@ -35,6 +38,9 @@ interface SignatureWorkspaceProps {
   batchProgress: BatchProgress | null;
   maskResidentNumber: boolean;
   signatureScalePreset: number;
+  placementMode: SignaturePlacementMode;
+  detectedSignatureColLabel: string | null;
+  enhanceSignatureInk: boolean;
   availableSheets: string[];
   activeSheetIndex: number;
   unmatchedWorkerCount: number;
@@ -43,6 +49,8 @@ interface SignatureWorkspaceProps {
   onExportFormatChange: (format: 'excel' | 'pdf' | 'png') => void;
   onMaskResidentNumberChange: (value: boolean) => void;
   onSignatureScalePresetChange: (value: number) => void;
+  onPlacementModeChange: (mode: SignaturePlacementMode) => void;
+  onEnhanceSignatureInkChange: (value: boolean) => void;
   onSelectSheet: (index: number) => void;
   onOpenManualMatch: () => void;
   onOpenSignaturePad: () => void;
@@ -72,6 +80,9 @@ export default function SignatureWorkspace(props: SignatureWorkspaceProps) {
     batchProgress,
     maskResidentNumber,
     signatureScalePreset,
+    placementMode,
+    detectedSignatureColLabel,
+    enhanceSignatureInk,
     availableSheets,
     activeSheetIndex,
     unmatchedWorkerCount,
@@ -80,6 +91,8 @@ export default function SignatureWorkspace(props: SignatureWorkspaceProps) {
     onExportFormatChange,
     onMaskResidentNumberChange,
     onSignatureScalePresetChange,
+    onPlacementModeChange,
+    onEnhanceSignatureInkChange,
     onSelectSheet,
     onOpenManualMatch,
     onOpenSignaturePad,
@@ -99,6 +112,76 @@ export default function SignatureWorkspace(props: SignatureWorkspaceProps) {
         <div>
           <h2 className="text-lg font-semibold text-slate-900">Control Panel</h2>
           <p className="text-xs text-slate-500 mt-0.5">서식 보존 및 실무 커스텀 옵션을 설정합니다.</p>
+        </div>
+
+        {/* 0. 서명 배치 위치 모드 (품목 수량 '1' 보호 vs 다중 셀 서명) */}
+        <div className="bg-indigo-50/70 border border-indigo-200 rounded-xl p-3.5 space-y-2.5">
+          <div className="flex items-center justify-between text-xs text-indigo-950">
+            <span className="flex items-center gap-1.5 font-semibold">
+              <Crosshair size={14} className="text-indigo-600" /> 서명 배치 위치
+            </span>
+            {detectedSignatureColLabel && (
+              <span className="px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 text-[10px] font-bold">
+                감지: [{detectedSignatureColLabel}] 열
+              </span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-2 gap-1 text-[11px]">
+            <button
+              type="button"
+              onClick={() => onPlacementModeChange('auto')}
+              disabled={processing}
+              className={`py-1.5 px-2 rounded-lg font-medium transition-colors ${
+                placementMode === 'auto' || placementMode === 'signatureColumnOnly'
+                  ? 'bg-indigo-600 text-white font-semibold shadow-sm'
+                  : 'bg-white border border-indigo-200 text-slate-700 hover:bg-indigo-50'
+              }`}
+            >
+              서명 열 전용 (권장)
+            </button>
+            <button
+              type="button"
+              onClick={() => onPlacementModeChange('placeholderCells')}
+              disabled={processing}
+              className={`py-1.5 px-2 rounded-lg font-medium transition-colors ${
+                placementMode === 'placeholderCells'
+                  ? 'bg-indigo-600 text-white font-semibold shadow-sm'
+                  : 'bg-white border border-indigo-200 text-slate-700 hover:bg-indigo-50'
+              }`}
+            >
+              1 표시 셀 전체
+            </button>
+          </div>
+          <p className="text-[11px] text-indigo-900/75 leading-tight">
+            {placementMode === 'placeholderCells'
+              ? "품목/날짜 등 '1' 표시가 있는 모든 칸에 서명을 배치합니다."
+              : detectedSignatureColLabel
+                ? `보호구 수량(1)은 건드리지 않고 [${detectedSignatureColLabel}] 열에만 서명을 꽉 차게 배치합니다.`
+                : "전용 '서명' 열이 없으면 자동으로 '1' 표시 셀에 배치합니다."}
+          </p>
+        </div>
+
+        {/* 0-2. 서명 여백 자동 제거 및 잉크 선명도 보정 */}
+        <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-1.5">
+          <div className="flex items-center justify-between">
+            <span className="flex items-center gap-1.5 text-xs font-semibold text-slate-800">
+              <Sparkles size={14} className="text-indigo-600" /> 서명 여백제거·진하게 보정
+            </span>
+            <label className="relative inline-flex items-center cursor-pointer">
+              <input
+                type="checkbox"
+                checked={enhanceSignatureInk}
+                onChange={(e) => onEnhanceSignatureInkChange(e.target.checked)}
+                disabled={processing}
+                className="sr-only peer"
+              />
+              <div className="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
+            </label>
+          </div>
+          <p className="text-[11px] text-slate-500 leading-tight">
+            스캔 여백을 자동 제거하고 흐릿한 필기선을 실제 볼펜처럼 진하게 보정합니다.
+          </p>
         </div>
 
         {/* 1. 개인정보 보호 (주민번호 마스킹) */}
@@ -412,9 +495,10 @@ export default function SignatureWorkspace(props: SignatureWorkspaceProps) {
                                     className="drop-shadow-sm mix-blend-multiply"
                                     style={{
                                       transform: cell.signature.transform,
-                                      opacity: cell.signature.opacity,
-                                      maxWidth: '130%',
-                                      maxHeight: '130%',
+                                      opacity: enhanceSignatureInk ? 0.95 : cell.signature.opacity,
+                                      filter: enhanceSignatureInk ? 'contrast(1.35) brightness(0.82)' : undefined,
+                                      maxWidth: '94%',
+                                      maxHeight: '94%',
                                       objectFit: 'contain',
                                     }}
                                   />

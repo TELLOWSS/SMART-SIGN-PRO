@@ -55,6 +55,8 @@ export interface SignatureAssignment {
   offsetY: number; // Pixels
 }
 
+export type SignaturePlacementMode = 'auto' | 'signatureColumnOnly' | 'placeholderCells';
+
 export interface AppState {
   step: 'upload' | 'preview' | 'export';
   excelFile: File | null;
@@ -66,4 +68,6 @@ export interface AppState {
   activeSheetIndex: number;
   maskResidentNumber: boolean;
   signatureScalePreset: number;
+  placementMode: SignaturePlacementMode;
+  enhanceSignatureInk: boolean;
 }

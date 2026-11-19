@@ -413,30 +413,90 @@ export const maskXmlContent = (xml: string): string => {
   });
 };
 
+export interface DetectedSheetColumns {
+  headerRowIndex: number; // 0-based index in rows array
+  nameCol: number;        // 1-based Excel column
+  signatureCols: { col: number; label: string }[]; // 1-based dedicated signature columns
+  residentCol: number;
+  jobCol: number;
+  companyCol: number;
+}
+
 /**
- * 시트 데이터에서 근로자 행을 정밀 추출하여 수동 매칭 및 관리 목록 생성
+ * 건설/안전 양식의 헤더 행과 핵심 열(성명, 서명 전용 열, 주민번호, 직종, 소속)을 정밀 탐지
+ * - 다단 병합 헤더(예: '품목' 2행 병합 + '서명' 2행 병합)를 지원
+ * - 상단 안내문("...수령함을 서명합니다.") 오탐을 방지하기 위해 성명 헤더 행 인근(±1~2행)의 짧은 헤더 셀(<=12자)만 서명 열로 인정
  */
-export const extractWorkerRowsFromSheet = (
-  rows: { index: number; cells: { row: number; col: number; value: any; address: string }[] }[],
-  assignments: Map<string, any>,
-  signatures: Map<string, any[]>
-) => {
+export const detectHeaderColumns = (
+  rows: { index: number; cells: { row: number; col: number; value: any; address: string }[] }[]
+): DetectedSheetColumns => {
   let nameCol = -1;
+  let headerRowIndex = -1;
   let residentCol = -1;
   let jobCol = -1;
   let companyCol = -1;
-  let headerRow = -1;
+  const signatureCols: { col: number; label: string }[] = [];
 
   const MAX_SEARCH = Math.min(50, rows.length);
 
+  // 1단계: '성명' / '이름' 열을 먼저 찾아 기준 헤더 행을 확정
   for (let r = 0; r < MAX_SEARCH; r++) {
     const row = rows[r];
     for (const cell of row.cells) {
       if (!cell.value) continue;
       const cleanVal = String(cell.value).replace(/[\s\u00A0\uFEFF]+/g, '');
-      if (nameCol === -1 && /(성명|이름|근로자|작업자)/i.test(cleanVal)) {
+      if (!cleanVal || cleanVal.length > 14) continue;
+
+      if (/^(성명|이름|근로자명|작업자명|근로자|작업자|수령자|name|employee)$/i.test(cleanVal)) {
         nameCol = cell.col;
-        headerRow = r;
+        headerRowIndex = r;
+        break;
+      }
+    }
+    if (nameCol !== -1) break;
+  }
+
+  // 폴백: 포함 검색 (짧은 헤더 셀에 한해)
+  if (nameCol === -1) {
+    for (let r = 0; r < MAX_SEARCH; r++) {
+      const row = rows[r];
+      for (const cell of row.cells) {
+        if (!cell.value) continue;
+        const cleanVal = String(cell.value).replace(/[\s\u00A0\uFEFF]+/g, '');
+        if (!cleanVal || cleanVal.length > 12) continue;
+        if (/(성명|이름|name|person|employee|직원)/i.test(cleanVal)) {
+          nameCol = cell.col;
+          headerRowIndex = r;
+          break;
+        }
+      }
+      if (nameCol !== -1) break;
+    }
+  }
+
+  if (nameCol === -1 || headerRowIndex === -1) {
+    return { headerRowIndex: -1, nameCol: -1, signatureCols: [], residentCol: -1, jobCol: -1, companyCol: -1 };
+  }
+
+  // 2단계: 기준 헤더 행 인근(headerRowIndex - 1 ~ headerRowIndex + 2)에서 서명 열 및 보조 열 탐지
+  const bandStart = Math.max(0, headerRowIndex - 1);
+  const bandEnd = Math.min(rows.length - 1, headerRowIndex + 2);
+  const seenSigCols = new Set<number>();
+
+  for (let r = bandStart; r <= bandEnd; r++) {
+    const row = rows[r];
+    for (const cell of row.cells) {
+      if (!cell.value || cell.col === nameCol) continue;
+      const rawLabel = String(cell.value).trim();
+      const cleanVal = rawLabel.replace(/[\s\u00A0\uFEFF]+/g, '');
+      if (!cleanVal || cleanVal.length > 12) continue;
+
+      if (
+        !seenSigCols.has(cell.col) &&
+        /^(서명|서명란|확인|확인란|수령인|수령확인|수령서명|본인서명|날인|사인|sign|signature)(\(인\)|\(서명\)|인)?$/i.test(cleanVal)
+      ) {
+        seenSigCols.add(cell.col);
+        signatureCols.push({ col: cell.col, label: rawLabel });
       }
       if (residentCol === -1 && /(주민등록번호|주민번호|생년월일|외국인번호)/i.test(cleanVal)) {
         residentCol = cell.col;
@@ -448,10 +508,35 @@ export const extractWorkerRowsFromSheet = (
         companyCol = cell.col;
       }
     }
-    if (nameCol !== -1 && headerRow !== -1) break;
   }
 
-  if (nameCol === -1) return [];
+  return {
+    headerRowIndex,
+    nameCol,
+    signatureCols,
+    residentCol,
+    jobCol,
+    companyCol,
+  };
+};
+
+/**
+ * 시트 데이터에서 근로자 행을 정밀 추출하여 수동 매칭 및 관리 목록 생성
+ * - placementMode('auto' | 'signatureColumnOnly' | 'placeholderCells')에 따라 실제 서명 대상 셀을 정확히 판별
+ */
+export const extractWorkerRowsFromSheet = (
+  rows: { index: number; cells: { row: number; col: number; value: any; address: string }[] }[],
+  assignments: Map<string, any>,
+  signatures: Map<string, any[]>,
+  placementMode: 'auto' | 'signatureColumnOnly' | 'placeholderCells' = 'auto'
+) => {
+  const detected = detectHeaderColumns(rows);
+  if (detected.nameCol === -1) return [];
+
+  const { headerRowIndex, nameCol, signatureCols, residentCol, jobCol, companyCol } = detected;
+  const useSignatureCols =
+    signatureCols.length > 0 &&
+    (placementMode === 'auto' || placementMode === 'signatureColumnOnly');
 
   const workerItems: {
     rowNumber: number;
@@ -465,45 +550,61 @@ export const extractWorkerRowsFromSheet = (
     isMatched: boolean;
   }[] = [];
 
-  for (let r = headerRow + 1; r < rows.length; r++) {
+  for (let r = headerRowIndex + 1; r < rows.length; r++) {
     const row = rows[r];
     const nameCell = row.cells.find(c => c.col === nameCol);
     if (!nameCell || !nameCell.value) continue;
 
     const workerName = String(nameCell.value).trim();
-    if (!workerName || workerName === '성명' || workerName === '소계' || workerName === '합계') continue;
+    const cleanWorkerName = workerName.replace(/[\s\u00A0\uFEFF]+/g, '');
+    if (!cleanWorkerName || /^(성명|이름|소계|합계|계|총계|비고)$/i.test(cleanWorkerName)) continue;
 
     const resCell = residentCol !== -1 ? row.cells.find(c => c.col === residentCol) : null;
     const jobCell = jobCol !== -1 ? row.cells.find(c => c.col === jobCol) : null;
     const compCell = companyCol !== -1 ? row.cells.find(c => c.col === companyCol) : null;
 
-    const placeholders: { row: number; col: number; address: string }[] = [];
+    const targetCells: { row: number; col: number; address: string }[] = [];
     let assignedVariantId: string | undefined;
     let assignedSignatureName: string | undefined;
 
-    for (const cell of row.cells) {
-      if (cell.col === nameCol) continue;
-      if (!cell.value) continue;
-      const cellStr = String(cell.value).replace(/[\s\u00A0\uFEFF]+/g, '');
-      if (isSignaturePlaceholder(cellStr)) {
-        placeholders.push({ row: cell.row, col: cell.col, address: cell.address });
-        const key = `${cell.row}:${cell.col}`;
+    if (useSignatureCols) {
+      for (const sigCol of signatureCols) {
+        const existingCell = row.cells.find(c => c.col === sigCol.col);
+        const addr = existingCell?.address || `${columnNumberToLetter(sigCol.col)}${row.index}`;
+        targetCells.push({ row: row.index, col: sigCol.col, address: addr });
+
+        const key = `${row.index}:${sigCol.col}`;
         const assignment = assignments.get(key);
         if (assignment) {
           assignedVariantId = assignment.signatureVariantId;
           assignedSignatureName = assignment.signatureBaseName;
         }
       }
+    } else {
+      for (const cell of row.cells) {
+        if (cell.col === nameCol) continue;
+        if (!cell.value) continue;
+        const cellStr = String(cell.value).replace(/[\s\u00A0\uFEFF]+/g, '');
+        if (isSignaturePlaceholder(cellStr)) {
+          targetCells.push({ row: cell.row, col: cell.col, address: cell.address });
+          const key = `${cell.row}:${cell.col}`;
+          const assignment = assignments.get(key);
+          if (assignment) {
+            assignedVariantId = assignment.signatureVariantId;
+            assignedSignatureName = assignment.signatureBaseName;
+          }
+        }
+      }
     }
 
-    if (placeholders.length > 0) {
+    if (targetCells.length > 0) {
       workerItems.push({
         rowNumber: row.index,
         workerName,
         jobTitle: jobCell?.value ? String(jobCell.value).trim() : undefined,
         affiliation: compCell?.value ? String(compCell.value).trim() : undefined,
         residentNumber: resCell?.value ? String(resCell.value).trim() : undefined,
-        placeholderCells: placeholders,
+        placeholderCells: targetCells,
         assignedVariantId,
         assignedSignatureName,
         isMatched: !!assignedVariantId,

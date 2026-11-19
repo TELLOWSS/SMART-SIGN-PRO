@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import { SignatureFile, SheetData } from '../types';
+import { SignatureFile, SheetData, SignaturePlacementMode } from '../types';
 import { autoMatchSignatures, generateFinalExcel } from './excelService';
 
 export interface BatchExportProgress {
@@ -21,6 +21,8 @@ export interface BatchExcelZipOptions {
   maskResidentNumber?: boolean;
   scaleMultiplier?: number;
   targetSheetIndex?: number;
+  placementMode?: SignaturePlacementMode;
+  enhanceSignatureInk?: boolean;
   onProgress?: (progress: BatchExportProgress) => void;
   signal?: AbortSignal;
 }
@@ -81,11 +83,13 @@ export const buildBatchExcelZip = async (options: BatchExcelZipOptions): Promise
     const assignments = autoMatchSignatures(sheetData, signatures, {
       variationStrength,
       scaleMultiplier: options.scaleMultiplier,
+      placementMode: options.placementMode,
     });
     const excelBlob = await generateFinalExcel(originalBuffer, assignments, signatures, {
       maskResidentNumber: options.maskResidentNumber,
       targetSheetIndex: options.targetSheetIndex,
       scaleMultiplier: options.scaleMultiplier,
+      enhanceSignatureInk: options.enhanceSignatureInk,
     });
     throwIfAborted(signal);
 
