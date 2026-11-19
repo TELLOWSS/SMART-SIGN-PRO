@@ -551,12 +551,8 @@ export const autoMatchSignatures = (
     return assignments;
   }
 
-  const useSignatureColumnOnly =
-    signatureCols.length > 0 &&
-    (placementMode === 'auto' || placementMode === 'signatureColumnOnly');
-
   console.log(
-    `[autoMatch] 성명 열=${nameColIndex}, 헤더행=${headerRowIndex}, 감지된 서명 전용 열=${signatureCols.map(s => `${s.label}(col ${s.col})`).join(', ') || '없음'}, 모드=${useSignatureColumnOnly ? '서명 열 전용(수량 1 보호)' : '1 표시 셀 전체'}`
+    `[autoMatch] 성명 열=${nameColIndex}, 헤더행=${headerRowIndex}, 감지된 서명 전용 열=${signatureCols.map(s => `${s.label}(col ${s.col})`).join(', ') || '없음'}, 모드=${placementMode}`
   );
 
   let matchedCount = 0;
@@ -649,20 +645,42 @@ export const autoMatchSignatures = (
       matchedCount++;
     };
 
-    if (useSignatureColumnOnly) {
-      // 전용 '서명' 열에만 배치 (보호구 수량 '1' 열은 절대 건드리지 않음!)
+    const assignedColsInRow = new Set<number>();
+    const assignOnce = (targetRow: number, targetCol: number) => {
+      if (assignedColsInRow.has(targetCol)) return;
+      assignedColsInRow.add(targetCol);
+      assignToTargetCell(targetRow, targetCol);
+    };
+
+    if (placementMode === 'signatureColumnOnly' && signatureCols.length > 0) {
+      // 전용 '서명' 열에만 1번 배치
       for (const sigCol of signatureCols) {
-        assignToTargetCell(row.index, sigCol.col);
+        assignOnce(row.index, sigCol.col);
       }
-    } else {
-      // 전용 서명 열이 없는 다중 서명 양식: '1' 표시된 모든 셀에 배치
+    } else if (placementMode === 'placeholderCells') {
+      // '1' 표시된 셀에만 배치
       for (const cell of row.cells) {
         if (cell.col === nameColIndex) continue;
         if (!cell.value) continue;
         const cellStr = cell.value.toString().replace(/[\s\u00A0\uFEFF]+/g, '');
         if (isSignaturePlaceholder(cellStr)) {
-          assignToTargetCell(cell.row, cell.col);
+          assignOnce(cell.row, cell.col);
         }
+      }
+    } else {
+      // 기본 'auto' 모드 (품목 + 서명 동시):
+      // 1) '1'이 표시된 품목 칸에 1번 서명
+      for (const cell of row.cells) {
+        if (cell.col === nameColIndex) continue;
+        if (!cell.value) continue;
+        const cellStr = cell.value.toString().replace(/[\s\u00A0\uFEFF]+/g, '');
+        if (isSignaturePlaceholder(cellStr)) {
+          assignOnce(cell.row, cell.col);
+        }
+      }
+      // 2) 전용 '서명' 열에 받았다는 확인 서명 1번 (이미 같은 열에 배치된 경우 중복 방지)
+      for (const sigCol of signatureCols) {
+        assignOnce(row.index, sigCol.col);
       }
     }
   }

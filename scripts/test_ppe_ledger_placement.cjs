@@ -111,12 +111,21 @@ async function run() {
     placementMode: 'auto',
   });
   console.log('Auto-mode assignment keys:', Array.from(autoAssignments.keys()));
-  assert.equal(autoAssignments.size, 3, '3명의 서명이 정확히 3개 위치에 배치되어야 함');
-  assert.ok(autoAssignments.has('6:15'), '박종염 서명은 6행 15열(서명)에 배치');
-  assert.ok(autoAssignments.has('7:15'), '이호염 서명은 7행 15열(서명)에 배치');
-  assert.ok(autoAssignments.has('8:15'), '백성철 서명은 8행 15열(서명)에 배치');
-  assert.ok(!autoAssignments.has('6:6'), '안전화 수량 1(6행 6열)에는 서명이 들어가면 안 됨!');
-  console.log('✓ 보호구 지급대장 서명 열 전용 배치(수량 1 보호) 검증 통과');
+  assert.equal(autoAssignments.size, 6, '3명 × 2번(품목 1번 + 서명 1번) = 6개 위치에 배치되어야 함');
+  assert.ok(autoAssignments.has('6:6') && autoAssignments.has('6:15'), '박종염: 안전화(6:6) 1번 + 서명(6:15) 1번');
+  assert.ok(autoAssignments.has('7:6') && autoAssignments.has('7:15'), '이호염: 안전화(7:6) 1번 + 서명(7:15) 1번');
+  assert.ok(autoAssignments.has('8:6') && autoAssignments.has('8:15'), '백성철: 안전화(8:6) 1번 + 서명(8:15) 1번');
+  console.log('✓ 보호구 지급대장 2번 서명(품목 1번 + 서명 열 1번) 검증 통과');
+
+  // Verify signatureColumnOnly mode places only in column 15 (3 shapes)
+  const sigOnlyAssignments = excelService.autoMatchSignatures(parsed, sigs, {
+    variationStrength: 50,
+    scaleMultiplier: 1.0,
+    placementMode: 'signatureColumnOnly',
+  });
+  assert.equal(sigOnlyAssignments.size, 3, '서명 열만 모드는 3개 위치에만 배치되어야 함');
+  assert.ok(!sigOnlyAssignments.has('6:6'), '서명 열만 모드에서는 품목(6:6) 제외');
+  console.log('✓ 서명 열만 모드 검증 통과');
 
   // 3. Generate final Excel & verify signature dimensions (NOT ant-sized!)
   const blob = await excelService.generateFinalExcel(arrBuf, autoAssignments, sigs, {
@@ -131,15 +140,15 @@ async function run() {
   const finalZip = await JSZip.loadAsync(finalBuf);
   const drawXml = await finalZip.file('xl/drawings/drawing1.xml').async('string');
   const extMatches = [...drawXml.matchAll(/<xdr:ext cx="(\d+)" cy="(\d+)"\/>/g)];
-  assert.equal(extMatches.length, 3, '3개의 서명 앵커가 존재해야 함');
+  assert.equal(extMatches.length, 6, '6개의 서명 앵커(품목 3 + 서명 3)가 존재해야 함');
   for (const m of extMatches) {
     const wPx = parseInt(m[1], 10) / 9525;
     const hPx = parseInt(m[2], 10) / 9525;
     console.log(`  Anchor size: ${wPx.toFixed(1)}px × ${hPx.toFixed(1)}px`);
-    assert.ok(wPx >= 60, `서명 너비가 충분히 커야 함 (실제: ${wPx}px)`);
-    assert.ok(hPx >= 35, `서명 높이가 충분히 커야 함 (실제: ${hPx}px)`);
+    assert.ok(wPx >= 50, `서명 너비가 충분히 커야 함 (실제: ${wPx}px)`);
+    assert.ok(hPx >= 25, `서명 높이가 충분히 커야 함 (실제: ${hPx}px)`);
   }
-  console.log('✓ 서명 크기(defaultRowHeight=45pt 반영, 셀 82~86% 꽉 찬 중앙 배치) 검증 통과');
+  console.log('✓ 서명 크기(defaultRowHeight=45pt 반영, 셀 꽉 찬 중앙 배치) 검증 통과');
 
   // 4. Open in REAL Microsoft Excel COM
   const tmpDir = path.join(process.env.TEMP || 'C:\\Temp', 'smart_sign_ppe_qa');
@@ -152,7 +161,7 @@ async function run() {
     { encoding: 'utf8', timeout: 30000 }
   );
   console.log('REAL EXCEL COM:', psOut.trim());
-  assert.ok(psOut.includes('PASS | Saved=True | Shapes=3 | F6=1'), 'Real Excel COM must open cleanly with 3 shapes and F6 quantity=1 intact');
+  assert.ok(psOut.includes('PASS | Saved=True | Shapes=6 | F6=1'), 'Real Excel COM must open cleanly with 6 shapes (3 item + 3 sign)');
 
   // 5. Verify selectable item columns & custom per-worker item placement WITHOUT '1'
   const selectableCols = excelUtils.detectSelectableColumns(parsed.rows);

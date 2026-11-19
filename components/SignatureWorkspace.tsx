@@ -140,38 +140,52 @@ export default function SignatureWorkspace(props: SignatureWorkspaceProps) {
             )}
           </div>
 
-          <div className="grid grid-cols-2 gap-1 text-[11px]">
+          <div className="grid grid-cols-3 gap-1 text-[11px]">
             <button
               type="button"
               onClick={() => onPlacementModeChange('auto')}
               disabled={processing}
-              className={`py-1.5 px-2 rounded-lg font-medium transition-colors ${
-                placementMode === 'auto' || placementMode === 'signatureColumnOnly'
+              className={`py-1.5 px-1.5 rounded-lg font-medium transition-colors ${
+                placementMode === 'auto'
                   ? 'bg-indigo-600 text-white font-semibold shadow-sm'
                   : 'bg-white border border-indigo-200 text-slate-700 hover:bg-indigo-50'
               }`}
             >
-              서명 열 전용 (권장)
+              품목+서명
+            </button>
+            <button
+              type="button"
+              onClick={() => onPlacementModeChange('signatureColumnOnly')}
+              disabled={processing}
+              className={`py-1.5 px-1.5 rounded-lg font-medium transition-colors ${
+                placementMode === 'signatureColumnOnly'
+                  ? 'bg-indigo-600 text-white font-semibold shadow-sm'
+                  : 'bg-white border border-indigo-200 text-slate-700 hover:bg-indigo-50'
+              }`}
+            >
+              서명 열만
             </button>
             <button
               type="button"
               onClick={() => onPlacementModeChange('placeholderCells')}
               disabled={processing}
-              className={`py-1.5 px-2 rounded-lg font-medium transition-colors ${
+              className={`py-1.5 px-1.5 rounded-lg font-medium transition-colors ${
                 placementMode === 'placeholderCells'
                   ? 'bg-indigo-600 text-white font-semibold shadow-sm'
                   : 'bg-white border border-indigo-200 text-slate-700 hover:bg-indigo-50'
               }`}
             >
-              1 표시 셀 전체
+              1 표시만
             </button>
           </div>
           <p className="text-[11px] text-indigo-900/75 leading-tight">
-            {placementMode === 'placeholderCells'
-              ? "품목/날짜 등 '1' 표시가 있는 모든 칸에 서명을 배치합니다."
-              : detectedSignatureColLabel
-                ? `보호구 수량(1)은 건드리지 않고 [${detectedSignatureColLabel}] 열에만 서명을 꽉 차게 배치합니다.`
-                : "전용 '서명' 열이 없으면 자동으로 '1' 표시 셀에 배치합니다."}
+            {placementMode === 'auto'
+              ? detectedSignatureColLabel
+                ? `품목 칸(1 표시·직접 클릭)에 1번 + [${detectedSignatureColLabel}] 열에 받았다고 1번, 2번 서명이 자동 연동됩니다.`
+                : "품목/서명 칸에 자연스럽게 서명을 배치합니다."
+              : placementMode === 'signatureColumnOnly'
+                ? "전용 '서명' 열에만 1번 서명을 배치합니다."
+                : "'1' 표시가 있는 셀에만 서명을 배치합니다."}
           </p>
         </div>
 

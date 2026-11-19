@@ -560,7 +560,14 @@ export default function App() {
     const rotLimit = Math.max(1, Math.round(1 + strengthFactor * 3));
     const oxLimit = Math.max(1, Math.round(1 + strengthFactor * 3));
     const oyLimit = Math.max(1, Math.round(1 + strengthFactor * 2));
-    const picked = matched.files[Math.floor(Math.random() * matched.files.length)];
+    const pickDistinctVariant = (files: SignatureFile[], avoidVariant?: string) => {
+      if (files.length <= 1) return files[0];
+      const others = avoidVariant ? files.filter(f => f.variant !== avoidVariant) : files;
+      const pool = others.length > 0 ? others : files;
+      return pool[Math.floor(Math.random() * pool.length)];
+    };
+
+    const picked = pickDistinctVariant(matched.files);
 
     const next = new Map(state.assignments);
     next.set(key, {
@@ -573,11 +580,35 @@ export default function App() {
       offsetX: randomInt(-oxLimit, oxLimit),
       offsetY: randomInt(-oyLimit, oyLimit),
     });
+
+    // '품목 + 서명 동시' 모드에서는 품목 칸을 클릭하면 해당 행의 전용 '서명' 열에도 받았다는 서명을 자동 추가
+    if (state.placementMode === 'auto') {
+      const sigCols = selectableColumns.filter(c => c.isSignatureCol);
+      for (const sc of sigCols) {
+        if (sc.col === col) continue;
+        const sigKey = `${row}:${sc.col}`;
+        if (!next.has(sigKey)) {
+          const picked2 = pickDistinctVariant(matched.files, picked.variant);
+          next.set(sigKey, {
+            row,
+            col: sc.col,
+            signatureBaseName: matched.baseName,
+            signatureVariantId: picked2.variant,
+            rotation: randomInt(-rotLimit, rotLimit),
+            scale: randomFloat(minScale, maxScale) * state.signatureScalePreset,
+            offsetX: randomInt(-oxLimit, oxLimit),
+            offsetY: randomInt(-oyLimit, oyLimit),
+          });
+        }
+      }
+    }
+
     setState(prev => ({ ...prev, assignments: next }));
   };
 
   /**
    * 상단 품목/서명 열 칩 클릭 -> '1' 표시 없이도 해당 품목 열 전체 근로자 서명 일괄 지정/해제
+   * - '품목 + 서명 동시' 모드에서 품목 열 지정 시 전용 '서명' 열에도 받았다는 서명 자동 연동
    */
   const handleToggleColumnSignatures = (col: number, label: string) => {
     const next = new Map(state.assignments);
@@ -599,8 +630,12 @@ export default function App() {
     const rotLimit = Math.max(1, Math.round(1 + strengthFactor * 3));
     const oxLimit = Math.max(1, Math.round(1 + strengthFactor * 3));
     const oyLimit = Math.max(1, Math.round(1 + strengthFactor * 2));
+    const sigCols = state.placementMode === 'auto'
+      ? selectableColumns.filter(c => c.isSignatureCol && c.col !== col)
+      : [];
 
     let added = 0;
+    let linkedSigCount = 0;
     for (const [rowNumber, info] of workerRowMap.entries()) {
       const matched = findSignatureForWorker(info.workerName, rowNumber, next, state.signatures);
       if (!matched) continue;
@@ -616,11 +651,33 @@ export default function App() {
         offsetY: randomInt(-oyLimit, oyLimit),
       });
       added++;
+
+      for (const sc of sigCols) {
+        const sigKey = `${rowNumber}:${sc.col}`;
+        if (!next.has(sigKey)) {
+          const others = matched.files.length > 1
+            ? matched.files.filter(f => f.variant !== picked.variant)
+            : matched.files;
+          const picked2 = others[Math.floor(Math.random() * others.length)] || picked;
+          next.set(sigKey, {
+            row: rowNumber,
+            col: sc.col,
+            signatureBaseName: matched.baseName,
+            signatureVariantId: picked2.variant,
+            rotation: randomInt(-rotLimit, rotLimit),
+            scale: randomFloat(minScale, maxScale) * state.signatureScalePreset,
+            offsetX: randomInt(-oxLimit, oxLimit),
+            offsetY: randomInt(-oyLimit, oyLimit),
+          });
+          linkedSigCount++;
+        }
+      }
     }
 
     setState(prev => ({ ...prev, assignments: next }));
     if (added > 0) {
-      setToast({ msg: `✅ [${label}] 열에 ${added}명의 서명이 일괄 지정되었습니다`, type: 'success' });
+      const extraMsg = linkedSigCount > 0 ? ` + 서명 열 ${linkedSigCount}건 자동 연동` : '';
+      setToast({ msg: `✅ [${label}] 열에 ${added}명 서명 지정${extraMsg}`, type: 'success' });
     } else {
       setToast({ msg: `⚠️ 매칭되는 서명 파일이 없습니다. 서명을 먼저 등록해주세요.`, type: 'info' });
     }
@@ -654,9 +711,11 @@ export default function App() {
       };
     });
     setToast({
-      msg: mode === 'placeholderCells'
-        ? "배치 모드 변경: '1' 표시 셀 전체에 서명 배치"
-        : "배치 모드 변경: 전용 '서명' 열에만 배치 (수량 1 보호)",
+      msg: mode === 'auto'
+        ? "배치 모드 변경: 품목에 1번 + 서명 열에 1번 (2번 동시 서명)"
+        : mode === 'signatureColumnOnly'
+          ? "배치 모드 변경: 전용 '서명' 열에만 1번 배치"
+          : "배치 모드 변경: '1' 표시 셀에만 배치",
       type: 'info',
     });
   };
